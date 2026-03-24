@@ -25,6 +25,29 @@ typedef struct {
     bool voicegroupLoaded;
 } M4AGuiSettings;
 
+typedef struct {
+    bool enabled;
+    char midiPath[512];
+    bool midiLoaded;
+    bool isPlaying;
+    double positionSeconds;
+    double totalSeconds;
+    bool trackUsed[MAX_TRACKS];
+    bool trackMuted[MAX_TRACKS];
+    uint8_t trackChannels[MAX_TRACKS];
+    uint8_t trackPrograms[MAX_TRACKS];
+} M4AGuiPlayerState;
+
+typedef struct {
+    bool loadMidi;
+    bool togglePlayPause;
+    bool stop;
+    bool restart;
+    bool trackMuteChanged;
+    char midiPath[512];
+    bool trackMuted[MAX_TRACKS];
+} M4AGuiPlayerActions;
+
 /*
  * Create GUI resources. Returns NULL on failure (e.g. no display available).
  * Must be called from the main thread.
@@ -103,6 +126,18 @@ bool m4a_gui_poll_voice_restore(M4AGuiState *gui, int *voiceIndex);
  * The plugin should call m4a_engine_refresh_voices() to propagate changes.
  */
 bool m4a_gui_poll_voices_dirty(M4AGuiState *gui);
+
+/*
+ * Enable optional standalone-player controls and push current state into the
+ * GUI. Pass NULL to disable the player tab.
+ */
+void m4a_gui_set_player_state(M4AGuiState *gui, const M4AGuiPlayerState *state);
+
+/*
+ * Poll for player actions initiated by the user. Returns true if any action
+ * was requested; the output is cleared after polling.
+ */
+bool m4a_gui_poll_player_actions(M4AGuiState *gui, M4AGuiPlayerActions *out);
 
 #ifdef __cplusplus
 }

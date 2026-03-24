@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define MAX_PCM_CHANNELS 12
 #define MAX_CGB_CHANNELS 4
 #define MAX_TRACKS 16
@@ -267,5 +271,9 @@ static inline uint32_t umul3232H32(uint32_t a, uint32_t b)
 {
     return (uint32_t)(((uint64_t)a * (uint64_t)b) >> 32);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* M4A_ENGINE_H */

@@ -89,6 +89,11 @@ struct M4AGuiState {
     int selectedVoice;
     int pendingRestoreVoice;  /* -1 = none */
     bool voicesDirty;         /* set when any voice param is edited */
+
+    /* Standalone player state */
+    M4AGuiPlayerState playerState;
+    M4AGuiPlayerActions pendingPlayerActions;
+    char midiPathBuf[512];
 };
 
 /* ---- Internal helpers ---- */
@@ -335,6 +340,92 @@ static void render_voices_tab(M4AGuiState *gui)
     }
 }
 
+static void render_player_tab(M4AGuiState *gui)
+{
+    if (!gui->playerState.enabled) {
+        ImGui::TextDisabled("Standalone player controls are not available in this mode.");
+        return;
+    }
+
+    ImGui::SeparatorText("MIDI File");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90.0f);
+    ImGui::InputText("##midiPath", gui->midiPathBuf, sizeof(gui->midiPathBuf));
+    ImGui::SameLine();
+    if (ImGui::Button("Load", ImVec2(80.0f, 0.0f))) {
+        snprintf(gui->pendingPlayerActions.midiPath,
+                 sizeof(gui->pendingPlayerActions.midiPath),
+                 "%s", gui->midiPathBuf);
+        gui->pendingPlayerActions.loadMidi = true;
+    }
+
+    ImGui::Text("Status: %s",
+                gui->playerState.midiLoaded ? "MIDI loaded" : "No MIDI loaded");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Transport");
+
+    if (ImGui::Button(gui->playerState.isPlaying ? "Pause" : "Play", ImVec2(90.0f, 0.0f)))
+        gui->pendingPlayerActions.togglePlayPause = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Stop", ImVec2(90.0f, 0.0f)))
+        gui->pendingPlayerActions.stop = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Restart", ImVec2(90.0f, 0.0f)))
+        gui->pendingPlayerActions.restart = true;
+
+    float progress = 0.0f;
+    if (gui->playerState.totalSeconds > 0.0) {
+        progress = (float)(gui->playerState.positionSeconds / gui->playerState.totalSeconds);
+        if (progress < 0.0f) progress = 0.0f;
+        if (progress > 1.0f) progress = 1.0f;
+    }
+    ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f));
+    ImGui::Text("%.2f / %.2f s",
+                gui->playerState.positionSeconds,
+                gui->playerState.totalSeconds);
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Tracks");
+
+    if (ImGui::BeginTable("##playerTracks", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Track");
+        ImGui::TableSetupColumn("Mute", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Ch");
+        ImGui::TableSetupColumn("Program");
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < MAX_TRACKS; i++) {
+            if (!gui->playerState.trackUsed[i])
+                continue;
+
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("Track %d", i);
+
+            ImGui::TableSetColumnIndex(1);
+            bool muted = gui->playerState.trackMuted[i];
+            char muteLabel[32];
+            snprintf(muteLabel, sizeof(muteLabel), "##mute%d", i);
+            if (ImGui::Checkbox(muteLabel, &muted)) {
+                gui->playerState.trackMuted[i] = muted;
+                memcpy(gui->pendingPlayerActions.trackMuted,
+                       gui->playerState.trackMuted,
+                       sizeof(gui->pendingPlayerActions.trackMuted));
+                gui->pendingPlayerActions.trackMuteChanged = true;
+            }
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%u", (unsigned)gui->playerState.trackChannels[i] + 1U);
+
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%u", (unsigned)gui->playerState.trackPrograms[i]);
+        }
+
+        ImGui::EndTable();
+    }
+}
+
 /* Render a single ImGui frame — called from PUGL_EXPOSE. */
 static void render_frame(M4AGuiState *gui)
 {
@@ -370,6 +461,10 @@ static void render_frame(M4AGuiState *gui)
     if (ImGui::BeginTabBar("##Tabs")) {
         if (ImGui::BeginTabItem("General")) {
             render_general_tab(gui);
+            ImGui::EndTabItem();
+        }
+        if (gui->playerState.enabled && ImGui::BeginTabItem("Player")) {
+            render_player_tab(gui);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Voices")) {
@@ -495,7 +590,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
     sync_buffers(gui);
 
     /* Create Pugl world and view */
-    gui->world = puglNewWorld(PUGL_MODULE, 0);
+    gui->world = puglNewWorld(host ? PUGL_MODULE : PUGL_PROGRAM, 0);
     if (!gui->world) {
         gui_log("m4a_gui_create: puglNewWorld failed");
         delete gui;
@@ -520,6 +615,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
     puglSetViewHint(gui->view, PUGL_DOUBLE_BUFFER,         1);
     puglSetViewHint(gui->view, PUGL_RESIZABLE,             1);
     puglSetSizeHint(gui->view, PUGL_DEFAULT_SIZE, (PuglSpan)GUI_W, (PuglSpan)GUI_H);
+    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, (PuglSpan)GUI_W, (PuglSpan)GUI_H);
     puglSetSizeHint(gui->view, PUGL_MIN_SIZE,     (PuglSpan)200,   (PuglSpan)150);
     puglSetViewString(gui->view, PUGL_WINDOW_TITLE, "poryaaaa");
 
@@ -624,6 +720,8 @@ bool m4a_gui_show(M4AGuiState *gui)
 
     if (!gui->realized) {
         /* Floating mode: realize now (no parent) */
+        puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE,
+                        (PuglSpan)gui->cachedWidth, (PuglSpan)gui->cachedHeight);
         PuglStatus st = puglRealize(gui->view);
         if (st != PUGL_SUCCESS) {
             gui_log("m4a_gui_show: puglRealize failed (%d)", (int)st);
@@ -733,6 +831,39 @@ bool m4a_gui_poll_voices_dirty(M4AGuiState *gui)
     if (!gui || !gui->voicesDirty)
         return false;
     gui->voicesDirty = false;
+    return true;
+}
+
+void m4a_gui_set_player_state(M4AGuiState *gui, const M4AGuiPlayerState *state)
+{
+    if (!gui) return;
+    if (!state) {
+        memset(&gui->playerState, 0, sizeof(gui->playerState));
+        gui->midiPathBuf[0] = '\0';
+        return;
+    }
+    bool midiPathChanged = strcmp(gui->playerState.midiPath, state->midiPath) != 0;
+    gui->playerState = *state;
+    if (midiPathChanged)
+        snprintf(gui->midiPathBuf, sizeof(gui->midiPathBuf), "%s", gui->playerState.midiPath);
+}
+
+bool m4a_gui_poll_player_actions(M4AGuiState *gui, M4AGuiPlayerActions *out)
+{
+    if (!gui)
+        return false;
+
+    if (!gui->pendingPlayerActions.loadMidi &&
+        !gui->pendingPlayerActions.togglePlayPause &&
+        !gui->pendingPlayerActions.stop &&
+        !gui->pendingPlayerActions.restart &&
+        !gui->pendingPlayerActions.trackMuteChanged) {
+        return false;
+    }
+
+    if (out)
+        *out = gui->pendingPlayerActions;
+    memset(&gui->pendingPlayerActions, 0, sizeof(gui->pendingPlayerActions));
     return true;
 }
 

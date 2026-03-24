@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(poryaaaa C CXX)
+project(poryaaaa C CXX OBJC OBJCXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -62,6 +62,15 @@ set(IMGUI_SOURCES
     plugin/imgui_impl_pugl.cpp
 )
 
+set(IMGUI_GLFW_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+)
+
 # Common source files (shared between plugin and test)
 set(ENGINE_SOURCES
     plugin/m4a_engine.c
@@ -69,6 +78,10 @@ set(ENGINE_SOURCES
     plugin/m4a_tables.c
     plugin/m4a_reverb.c
     plugin/voicegroup_loader.c
+)
+
+set(MIDI_TIMELINE_SOURCES
+    plugin/midi_timeline.c
 )
 
 # ---- CLAP Plugin ----
@@ -105,7 +118,7 @@ endif()
 
 # OpenGL
 if(APPLE)
-    target_link_libraries(poryaaaa PRIVATE "-framework OpenGL" "-framework Cocoa")
+    target_link_libraries(poryaaaa PRIVATE "-framework OpenGL" "-framework Cocoa" "-framework CoreVideo")
 elseif(WIN32)
     target_link_libraries(poryaaaa PRIVATE opengl32)
 else()
@@ -139,6 +152,7 @@ target_link_libraries(poryaaaa_test PRIVATE m)
 add_executable(poryaaaa_render
     cmd/poryaaaa_render.c
     ${ENGINE_SOURCES}
+    ${MIDI_TIMELINE_SOURCES}
 )
 target_include_directories(poryaaaa_render PRIVATE plugin third_party)
 target_link_libraries(poryaaaa_render PRIVATE m)
@@ -150,6 +164,44 @@ if(APPLE)
 endif()
 if(WIN32)
     target_link_libraries(poryaaaa_render PRIVATE -static-libgcc)
+endif()
+
+# ---- GUI Player ----
+add_executable(poryaaaa_player
+    cmd/poryaaaa_player.cpp
+    ${ENGINE_SOURCES}
+    ${MIDI_TIMELINE_SOURCES}
+    ${IMGUI_GLFW_SOURCES}
+)
+target_include_directories(poryaaaa_player PRIVATE
+    plugin
+    third_party
+    /opt/homebrew/opt/glfw/include
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+)
+set_target_properties(poryaaaa_player PROPERTIES
+    LINKER_LANGUAGE CXX
+)
+target_link_libraries(poryaaaa_player PRIVATE m)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(poryaaaa_player PRIVATE pthread dl GL glfw)
+endif()
+if(APPLE)
+    target_link_libraries(poryaaaa_player PRIVATE
+        /opt/homebrew/opt/glfw/lib/libglfw.3.dylib
+        "-framework OpenGL"
+        "-framework Cocoa"
+        "-framework CoreVideo"
+        "-framework IOKit"
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework CoreFoundation"
+    )
+endif()
+if(WIN32)
+    target_link_libraries(poryaaaa_player PRIVATE opengl32 dwmapi -static-libgcc -static-libstdc++)
 endif()
 
 # ---- Unit Tests ----
@@ -189,7 +241,7 @@ target_link_libraries(poryaaaa-standalone PRIVATE clap)
 if(UNIX AND NOT APPLE)
     target_link_libraries(poryaaaa-standalone PRIVATE m GL X11 Xcursor Xrandr Xext)
 elseif(APPLE)
-    target_link_libraries(poryaaaa-standalone PRIVATE "-framework OpenGL" "-framework Cocoa")
+    target_link_libraries(poryaaaa-standalone PRIVATE "-framework OpenGL" "-framework Cocoa" "-framework CoreVideo")
 elseif(WIN32)
     target_link_libraries(poryaaaa-standalone PRIVATE opengl32 dwmapi -static-libgcc -static-libstdc++)
 endif()

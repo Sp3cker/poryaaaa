@@ -171,6 +171,18 @@ sudo apt-get install build-essential cmake pkg-config
 sudo apt-get install libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libgl-dev libasound-dev
 ```
 
+Initialize submodules before configuring the project:
+
+```bash
+git submodule update --init --recursive
+```
+
+On macOS, make sure the Xcode command line tools and Interface Builder components are initialized at least once:
+
+```bash
+xcodebuild -runFirstLaunch
+```
+
 ```bash
 cmake -B build
 cmake --build build

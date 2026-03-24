@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int8_t *buffer;     /* stereo interleaved: L,R,L,R,... */
     int bufferSize;     /* total buffer size in samples (per channel) */
@@ -16,5 +20,9 @@ void m4a_reverb_destroy(M4AReverb *reverb);
 void m4a_reverb_reset(M4AReverb *reverb);
 void m4a_reverb_set_amount(M4AReverb *reverb, uint8_t amount);
 void m4a_reverb_process(M4AReverb *reverb, int32_t *sampleL, int32_t *sampleR);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* M4A_REVERB_H */

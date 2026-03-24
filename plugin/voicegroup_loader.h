@@ -3,6 +3,10 @@
 
 #include "m4a_engine.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define VOICEGROUP_SIZE 128
 #define VG_MAX_PATH_LEN 512
 
@@ -76,5 +80,9 @@ void voicegroup_free(LoadedVoiceGroup *vg);
  * Call before voicegroup_load() for the output to be useful.
  */
 void voicegroup_loader_set_log_path(const char *path);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VOICEGROUP_LOADER_H */
