@@ -9,6 +9,8 @@ Composing custom music for Pokémon GBA games normally requires a slow iteration
 These are the available poryaaaa tools:
 
 - **`poryaaaa.clap`**: a CLAP instrument plugin. Insert it on a MIDI track in your DAW and hear the GBA-accurate audio in real time as you compose.
+- **`poryaaaa.vst3`**: a self-contained VST3 build of the same instrument plugin for DAWs that do not support CLAP.
+- **`poryaaaa.component`**: a macOS Audio Unit v2 build of the same instrument plugin for AU hosts such as Logic Pro and GarageBand.
 - **`poryaaaa_standalone(.exe)`**: a standalone GUI that wraps the CLAP plugin. It receives MIDI from any connected device or virtual cable and plays audio through your speakers.
 - **`poryaaaa_render(.exe)`**: a standalone command-line renderer. Feed it a MIDI file and a voicegroup name; it outputs a WAV file and/or plays audio through your speakers. Supports looping with configurable repeat count and fadeout.
 
@@ -139,6 +141,35 @@ Caveat: I haven't actually tested this on Linux.  It theoretically works...
 
 The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings can be changed live through the GUI and are saved in the DAW's project state.
 
+### VST3 plugin in a DAW
+
+`poryaaaa.vst3` exposes the same synth and GUI through the VST3 format. It embeds the CLAP entrypoint directly, so it does not need a separate `poryaaaa.clap` installed beside it.
+
+1. Copy `poryaaaa.vst3` to your DAW's VST3 plugin directory.
+   - Windows: `C:\Program Files\Common Files\VST3`
+   - macOS: `/Library/Audio/Plug-Ins/VST3` or `~/Library/Audio/Plug-Ins/VST3`
+   - Linux: `~/.vst3` or `/usr/lib/vst3`
+2. Place `poryaaaa.cfg` next to the installed `.vst3` file or bundle.
+3. Edit the config the same way as the CLAP build:
+   ```ini
+   project_root=/path/to/pokeemerald
+   voicegroup=petalburg
+   ```
+4. Rescan plugins in your DAW and insert `poryaaaa` as an instrument.
+
+### Audio Unit plugin in a DAW
+
+`poryaaaa.component` exposes the same synth through Audio Unit v2 on macOS. This is the format Logic Pro and GarageBand expect.
+
+1. Copy `poryaaaa.component` to `/Library/Audio/Plug-Ins/Components` or `~/Library/Audio/Plug-Ins/Components`.
+2. Place `poryaaaa.cfg` next to the installed `.component` bundle.
+3. Edit the config the same way as the CLAP/VST3 builds:
+   ```ini
+   project_root=/path/to/pokeemerald
+   voicegroup=petalburg
+   ```
+4. Rescan Audio Units or relaunch the host and insert `poryaaaa` as a software instrument.
+
 #### Plugin config reference
 
 | Key | Default | Description |
@@ -188,11 +219,25 @@ cmake -B build
 cmake --build build
 ```
 
+To build the VST3 target, `clap-wrapper` also needs access to the Steinberg VST3 SDK. You can either:
+
+- Set `-DVST3_SDK_ROOT=/path/to/vst3sdk`
+- Leave `CLAP_WRAPPER_DOWNLOAD_DEPENDENCIES=TRUE` enabled and let CMake fetch it during configure
+
+Building a VST3 also requires complying with the Steinberg VST3 SDK license terms.
+
+To build the AU target on macOS, `clap-wrapper` also needs the Apple AudioUnitSDK. You can either:
+
+- Set `-DAUDIOUNIT_SDK_ROOT=/path/to/AudioUnitSDK`
+- Leave `CLAP_WRAPPER_DOWNLOAD_DEPENDENCIES=TRUE` enabled and let CMake fetch it during configure
+
 This produces the following targets:
 
 | Target | Output | Description |
 |--------|--------|-------------|
 | `poryaaaa` | `poryaaaa.clap` | CLAP instrument plugin |
+| `poryaaaa-vst3` | `poryaaaa.vst3` | VST3 instrument plugin |
+| `poryaaaa-auv2` | `poryaaaa.component` | macOS Audio Unit v2 instrument plugin |
 | `poryaaaa-standalone` | `poryaaaa_standalone(.exe)` | Standalone GUI |
 | `poryaaaa_render` | `poryaaaa_render(.exe)` | Standalone MIDI renderer |
 | `poryaaaa_test` | `poryaaaa` | Quick WAV export test (hardcoded sequence) |
@@ -201,6 +246,8 @@ This produces the following targets:
 To build a single target:
 
 ```bash
+cmake --build build --target poryaaaa-auv2
+cmake --build build --target poryaaaa-vst3
 cmake --build build --target poryaaaa-standalone
 cmake --build build --target poryaaaa_render
 ```
@@ -214,6 +261,7 @@ cmake --build build-windows
 ```
 
 Copy `build-windows/poryaaaa.clap` to your DAW's CLAP plugin directory (e.g. `%APPDATA%\CLAP` or `C:\Program Files\Common Files\CLAP`).
+Copy `build-windows/poryaaaa.vst3` to your VST3 plugin directory (e.g. `C:\Program Files\Common Files\VST3`) if you built the VST3 target.
 
 ### Running tests
 

@@ -304,6 +304,8 @@ void m4a_cgb_mod_vol(M4ACGBChannel *ch)
  */
 void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15)
 {
+    int doubleStep = (c15 == 0) ? 1 : 0;
+
     if (!(ch->status & CHN_ON))
         return;
 
@@ -359,7 +361,6 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15)
     }
 
     {
-        int doubleStep = (c15 == 0) ? 1 : 0;
         int steps = 0;
 
 step_repeat:

@@ -46,7 +46,7 @@ static const clap_plugin_descriptor_t s_descriptor = {
 /* ---- Config file ---- */
 
 /*
- * Directory of the loaded .clap file, set during entry_init.
+ * Directory of the loaded plugin binary or bundle, set during entry_init.
  * Used to find poryaaaa.cfg in the same directory as the plugin.
  */
 static char s_pluginDir[512] = {0};
@@ -55,7 +55,7 @@ static char s_pluginDir[512] = {0};
 static const char *s_pluginLogPath = NULL;
 
 /*
- * Load settings from poryaaaa.cfg placed next to the .clap file.
+ * Load settings from poryaaaa.cfg placed next to the plugin install.
  *
  * The config file uses simple key=value lines, one per line.
  * Lines starting with '#' are comments and are ignored.
@@ -184,7 +184,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->activated = false;
     data->gui = NULL;
     data->guiTimerId = CLAP_INVALID_ID;
-    /* Load defaults from config file placed next to the .clap */
+    /* Load defaults from config file placed next to the plugin */
     load_config_file(data);
     /* Forward the log path into the voicegroup loader so it can emit diagnostics */
     voicegroup_loader_set_log_path(s_pluginLogPath);

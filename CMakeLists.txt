@@ -21,6 +21,16 @@ if(TARGET clap-wrapper-compile-options)
     endif()
 endif()
 
+set(PORYAAAA_APPLE_COMPILE_DEFINITIONS)
+set(PORYAAAA_APPLE_COMPILE_OPTIONS)
+if(APPLE)
+    list(APPEND PORYAAAA_APPLE_COMPILE_DEFINITIONS GL_SILENCE_DEPRECATION=1)
+    list(APPEND PORYAAAA_APPLE_COMPILE_OPTIONS
+        -Wno-deprecated-declarations
+        -Wno-gnu-statement-expression-from-macro-expansion
+    )
+endif()
+
 # ---- Pugl ----
 set(PUGL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pugl)
 
@@ -84,8 +94,7 @@ set(MIDI_TIMELINE_SOURCES
     plugin/midi_timeline.c
 )
 
-# ---- CLAP Plugin ----
-add_library(poryaaaa MODULE
+set(PORYAAAA_PLUGIN_SOURCES
     plugin/m4a_plugin.c
     plugin/m4a_gui.cpp
     ${ENGINE_SOURCES}
@@ -93,12 +102,19 @@ add_library(poryaaaa MODULE
     ${PUGL_SOURCES}
 )
 
-target_include_directories(poryaaaa PRIVATE
+set(PORYAAAA_PLUGIN_INCLUDE_DIRS
     plugin
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
     ${PUGL_DIR}/include
 )
+
+# ---- CLAP Plugin ----
+add_library(poryaaaa MODULE ${PORYAAAA_PLUGIN_SOURCES})
+
+target_include_directories(poryaaaa PRIVATE ${PORYAAAA_PLUGIN_INCLUDE_DIRS})
+target_compile_definitions(poryaaaa PRIVATE ${PORYAAAA_APPLE_COMPILE_DEFINITIONS})
+target_compile_options(poryaaaa PRIVATE ${PORYAAAA_APPLE_COMPILE_OPTIONS})
 
 # Build Pugl as a static library (not a DLL) on all platforms
 target_compile_definitions(poryaaaa PRIVATE PUGL_STATIC)
@@ -133,6 +149,73 @@ elseif(APPLE)
         BUNDLE TRUE
         BUNDLE_EXTENSION "clap"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/plugin/Info.plist"
+    )
+endif()
+
+# ---- VST3 Plugin ----
+add_library(poryaaaa-vst3 MODULE ${PORYAAAA_PLUGIN_SOURCES})
+
+target_include_directories(poryaaaa-vst3 PRIVATE ${PORYAAAA_PLUGIN_INCLUDE_DIRS})
+target_compile_definitions(poryaaaa-vst3 PRIVATE PUGL_STATIC)
+target_compile_definitions(poryaaaa-vst3 PRIVATE ${PORYAAAA_APPLE_COMPILE_DEFINITIONS})
+target_compile_options(poryaaaa-vst3 PRIVATE ${PORYAAAA_APPLE_COMPILE_OPTIONS})
+
+set_target_properties(poryaaaa-vst3 PROPERTIES
+    LINKER_LANGUAGE CXX
+)
+
+target_link_libraries(poryaaaa-vst3 PRIVATE clap)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(poryaaaa-vst3 PRIVATE m X11 Xcursor Xrandr Xext)
+endif()
+
+if(APPLE)
+    target_link_libraries(poryaaaa-vst3 PRIVATE "-framework OpenGL" "-framework Cocoa" "-framework CoreVideo")
+elseif(WIN32)
+    target_link_libraries(poryaaaa-vst3 PRIVATE opengl32)
+else()
+    target_link_libraries(poryaaaa-vst3 PRIVATE GL)
+endif()
+
+if(WIN32)
+    target_link_libraries(poryaaaa-vst3 PRIVATE dwmapi -static-libgcc -static-libstdc++)
+endif()
+
+target_add_vst3_wrapper(
+    TARGET poryaaaa-vst3
+    OUTPUT_NAME "poryaaaa"
+)
+
+if(APPLE)
+    # ---- AUv2 Plugin ----
+    add_library(poryaaaa-auv2 MODULE ${PORYAAAA_PLUGIN_SOURCES})
+
+    target_include_directories(poryaaaa-auv2 PRIVATE ${PORYAAAA_PLUGIN_INCLUDE_DIRS})
+    target_compile_definitions(poryaaaa-auv2 PRIVATE PUGL_STATIC)
+    target_compile_definitions(poryaaaa-auv2 PRIVATE ${PORYAAAA_APPLE_COMPILE_DEFINITIONS})
+    target_compile_options(poryaaaa-auv2 PRIVATE ${PORYAAAA_APPLE_COMPILE_OPTIONS})
+
+    set_target_properties(poryaaaa-auv2 PROPERTIES
+        LINKER_LANGUAGE CXX
+    )
+
+    target_link_libraries(poryaaaa-auv2 PRIVATE
+        clap
+        "-framework OpenGL"
+        "-framework Cocoa"
+        "-framework CoreVideo"
+    )
+
+    target_add_auv2_wrapper(
+        TARGET poryaaaa-auv2
+        OUTPUT_NAME "poryaaaa"
+        BUNDLE_IDENTIFIER "com.huderlem.poryaaaa"
+        BUNDLE_VERSION "0.1.0"
+        MANUFACTURER_NAME "huderlem"
+        MANUFACTURER_CODE "HudL"
+        SUBTYPE_CODE "Prya"
+        INSTRUMENT_TYPE "aumu"
     )
 endif()
 
@@ -217,19 +300,10 @@ target_include_directories(poryaaaa_unit_tests PRIVATE
 target_link_libraries(poryaaaa_unit_tests PRIVATE m)
 
 # ---- Standalone (clap-wrapper) ----
-add_executable(poryaaaa-standalone
-    plugin/m4a_plugin.c
-    plugin/m4a_gui.cpp
-    ${ENGINE_SOURCES}
-    ${IMGUI_SOURCES}
-    ${PUGL_SOURCES}
-)
-target_include_directories(poryaaaa-standalone PRIVATE
-    plugin
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
-    ${PUGL_DIR}/include
-)
+add_executable(poryaaaa-standalone ${PORYAAAA_PLUGIN_SOURCES})
+target_include_directories(poryaaaa-standalone PRIVATE ${PORYAAAA_PLUGIN_INCLUDE_DIRS})
+target_compile_definitions(poryaaaa-standalone PRIVATE ${PORYAAAA_APPLE_COMPILE_DEFINITIONS})
+target_compile_options(poryaaaa-standalone PRIVATE ${PORYAAAA_APPLE_COMPILE_OPTIONS})
 set_target_properties(poryaaaa-standalone PROPERTIES
     LINKER_LANGUAGE CXX
 )

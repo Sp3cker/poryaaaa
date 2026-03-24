@@ -1148,23 +1148,6 @@ static uint32_t *load_prog_wave(const char *projectRoot, const char *relativePat
     return data;
 }
 
-/* ---- Sample fallback resolution ---- */
-
-/*
- * Try to find and load a .wav sample by searching discovered wav directories.
- */
-static WaveData *resolve_sample_from_wav_dirs(const char *symbol,
-                                               const ProjectDiscovery *disc)
-{
-    for (int i = 0; i < disc->wavSampleDirs.count; i++) {
-        char wavPath[MAX_PATH_LEN];
-        snprintf(wavPath, sizeof(wavPath), "%s%c%s.wav", disc->wavSampleDirs.paths[i], PATH_SEP, symbol);
-        WaveData *wd = load_wav_from_path(wavPath);
-        if (wd) return wd;
-    }
-    return NULL;
-}
-
 /*
  * Unified sample resolution: try symbol map first, then fallback to wav dirs.
  * Uses waveCache to avoid loading the same file more than once.
