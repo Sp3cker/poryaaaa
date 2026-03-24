@@ -16,6 +16,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <time.h>
 
 /* ---- Debug logging ---- */
@@ -94,6 +95,8 @@ struct M4AGuiState {
     M4AGuiPlayerState playerState;
     M4AGuiPlayerActions pendingPlayerActions;
     char midiPathBuf[512];
+    bool playerSeekDragging;
+    double playerSeekPreviewSeconds;
 };
 
 /* ---- Internal helpers ---- */
@@ -104,6 +107,15 @@ static void sync_buffers(M4AGuiState *gui)
              "%s", gui->settings.projectRoot);
     snprintf(gui->voicegroupBuf, sizeof(gui->voicegroupBuf),
              "%s", gui->settings.voicegroupName);
+}
+
+static double clamp_player_seek_seconds(double seconds, double totalSeconds)
+{
+    if (seconds < 0.0)
+        return 0.0;
+    if (totalSeconds > 0.0 && seconds > totalSeconds)
+        return totalSeconds;
+    return seconds;
 }
 
 /* ---- Voice type helpers ---- */
@@ -373,15 +385,49 @@ static void render_player_tab(M4AGuiState *gui)
     if (ImGui::Button("Restart", ImVec2(90.0f, 0.0f)))
         gui->pendingPlayerActions.restart = true;
 
-    float progress = 0.0f;
-    if (gui->playerState.totalSeconds > 0.0) {
-        progress = (float)(gui->playerState.positionSeconds / gui->playerState.totalSeconds);
-        if (progress < 0.0f) progress = 0.0f;
-        if (progress > 1.0f) progress = 1.0f;
+    ImGui::Spacing();
+
+    const bool canSeek = gui->playerState.midiLoaded && gui->playerState.totalSeconds > 0.0;
+    double playheadSeconds = gui->playerSeekDragging
+                           ? gui->playerSeekPreviewSeconds
+                           : gui->playerState.positionSeconds;
+    playheadSeconds = clamp_player_seek_seconds(playheadSeconds, gui->playerState.totalSeconds);
+
+    ImGui::Text("Playhead");
+    if (!canSeek)
+        ImGui::BeginDisabled();
+    ImGui::SetNextItemWidth(-1.0f);
+    const double minSeconds = 0.0;
+    const double maxSeconds = gui->playerState.totalSeconds > 0.0
+                            ? gui->playerState.totalSeconds
+                            : 0.0;
+    if (ImGui::SliderScalar("##playhead", ImGuiDataType_Double,
+                            &playheadSeconds, &minSeconds, &maxSeconds,
+                            "%.2f s", ImGuiSliderFlags_NoRoundToFormat)) {
+        gui->playerSeekPreviewSeconds =
+            clamp_player_seek_seconds(playheadSeconds, gui->playerState.totalSeconds);
     }
-    ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f));
+    if (ImGui::IsItemActivated()) {
+        gui->playerSeekDragging = true;
+        gui->playerSeekPreviewSeconds =
+            clamp_player_seek_seconds(playheadSeconds, gui->playerState.totalSeconds);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        gui->playerSeekDragging = false;
+        gui->playerSeekPreviewSeconds =
+            clamp_player_seek_seconds(playheadSeconds, gui->playerState.totalSeconds);
+        if (fabs(gui->playerSeekPreviewSeconds - gui->playerState.positionSeconds) > 0.0005) {
+            gui->pendingPlayerActions.seek = true;
+            gui->pendingPlayerActions.seekSeconds = gui->playerSeekPreviewSeconds;
+        }
+    } else if (!ImGui::IsItemActive()) {
+        gui->playerSeekDragging = false;
+    }
+    if (!canSeek)
+        ImGui::EndDisabled();
     ImGui::Text("%.2f / %.2f s",
-                gui->playerState.positionSeconds,
+                gui->playerSeekDragging ? gui->playerSeekPreviewSeconds
+                                        : gui->playerState.positionSeconds,
                 gui->playerState.totalSeconds);
 
     ImGui::Spacing();
@@ -840,10 +886,20 @@ void m4a_gui_set_player_state(M4AGuiState *gui, const M4AGuiPlayerState *state)
     if (!state) {
         memset(&gui->playerState, 0, sizeof(gui->playerState));
         gui->midiPathBuf[0] = '\0';
+        gui->playerSeekDragging = false;
+        gui->playerSeekPreviewSeconds = 0.0;
         return;
     }
     bool midiPathChanged = strcmp(gui->playerState.midiPath, state->midiPath) != 0;
+    bool playbackRangeChanged = gui->playerState.totalSeconds != state->totalSeconds;
     gui->playerState = *state;
+    if (midiPathChanged || playbackRangeChanged)
+        gui->playerSeekDragging = false;
+    if (!gui->playerSeekDragging) {
+        gui->playerSeekPreviewSeconds =
+            clamp_player_seek_seconds(gui->playerState.positionSeconds,
+                                      gui->playerState.totalSeconds);
+    }
     if (midiPathChanged)
         snprintf(gui->midiPathBuf, sizeof(gui->midiPathBuf), "%s", gui->playerState.midiPath);
 }
@@ -857,6 +913,7 @@ bool m4a_gui_poll_player_actions(M4AGuiState *gui, M4AGuiPlayerActions *out)
         !gui->pendingPlayerActions.togglePlayPause &&
         !gui->pendingPlayerActions.stop &&
         !gui->pendingPlayerActions.restart &&
+        !gui->pendingPlayerActions.seek &&
         !gui->pendingPlayerActions.trackMuteChanged) {
         return false;
     }

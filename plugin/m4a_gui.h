@@ -43,6 +43,8 @@ typedef struct {
     bool togglePlayPause;
     bool stop;
     bool restart;
+    bool seek;
+    double seekSeconds;
     bool trackMuteChanged;
     char midiPath[512];
     bool trackMuted[MAX_TRACKS];

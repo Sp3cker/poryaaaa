@@ -187,38 +187,6 @@ target_add_vst3_wrapper(
     OUTPUT_NAME "poryaaaa"
 )
 
-if(APPLE)
-    # ---- AUv2 Plugin ----
-    add_library(poryaaaa-auv2 MODULE ${PORYAAAA_PLUGIN_SOURCES})
-
-    target_include_directories(poryaaaa-auv2 PRIVATE ${PORYAAAA_PLUGIN_INCLUDE_DIRS})
-    target_compile_definitions(poryaaaa-auv2 PRIVATE PUGL_STATIC)
-    target_compile_definitions(poryaaaa-auv2 PRIVATE ${PORYAAAA_APPLE_COMPILE_DEFINITIONS})
-    target_compile_options(poryaaaa-auv2 PRIVATE ${PORYAAAA_APPLE_COMPILE_OPTIONS})
-
-    set_target_properties(poryaaaa-auv2 PROPERTIES
-        LINKER_LANGUAGE CXX
-    )
-
-    target_link_libraries(poryaaaa-auv2 PRIVATE
-        clap
-        "-framework OpenGL"
-        "-framework Cocoa"
-        "-framework CoreVideo"
-    )
-
-    target_add_auv2_wrapper(
-        TARGET poryaaaa-auv2
-        OUTPUT_NAME "poryaaaa"
-        BUNDLE_IDENTIFIER "com.huderlem.poryaaaa"
-        BUNDLE_VERSION "0.1.0"
-        MANUFACTURER_NAME "huderlem"
-        MANUFACTURER_CODE "HudL"
-        SUBTYPE_CODE "Prya"
-        INSTRUMENT_TYPE "aumu"
-    )
-endif()
-
 # ---- Standalone Test (WAV export) ----
 add_executable(poryaaaa_test
     test/test_wav_export.c
@@ -252,6 +220,7 @@ endif()
 # ---- GUI Player ----
 add_executable(poryaaaa_player
     cmd/poryaaaa_player.cpp
+    cmd/native_file_dialog_stub.cpp
     ${ENGINE_SOURCES}
     ${MIDI_TIMELINE_SOURCES}
     ${IMGUI_GLFW_SOURCES}
@@ -272,6 +241,7 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(poryaaaa_player PRIVATE pthread dl GL glfw)
 endif()
 if(APPLE)
+    target_sources(poryaaaa_player PRIVATE cmd/native_file_dialog_mac.mm)
     target_link_libraries(poryaaaa_player PRIVATE
         /opt/homebrew/opt/glfw/lib/libglfw.3.dylib
         "-framework OpenGL"

@@ -20,6 +20,7 @@
 #include "m4a_engine.h"
 #include "m4a_reverb.h"
 #include "midi_timeline.h"
+#include "native_file_dialog.h"
 #include "voicegroup_loader.h"
 
 typedef struct {
@@ -57,6 +58,9 @@ typedef struct {
 
     LoadedVoiceGroup *loadedVg;
     MidiTimeline *timeline;
+    ToneData originalVoices[VOICEGROUP_SIZE];
+    bool voiceOverrides[VOICEGROUP_SIZE];
+    int selectedVoice;
 
     ma_device device;
     bool deviceInitialized;
@@ -71,6 +75,45 @@ typedef struct {
     float scratchL[4096];
     float scratchR[4096];
 } PlayerApp;
+
+static const char *voice_type_name(uint8_t type)
+{
+    uint8_t base = type & ~VOICE_TYPE_FIX;
+    switch (base) {
+    case 0x00: return "DirectSound";
+    case 0x01: return "Square 1";
+    case 0x02: return "Square 2";
+    case 0x03: return "Prog Wave";
+    case 0x04: return "Noise";
+    case VOICE_CRY:          return "Cry";
+    case VOICE_CRY_REVERSE:  return "Cry (Reverse)";
+    case VOICE_KEYSPLIT:     return "Keysplit";
+    case VOICE_KEYSPLIT_ALL: return "Drum Kit";
+    default: return "Unknown";
+    }
+}
+
+static bool edit_directsound_adsr(ToneData *voice)
+{
+    bool changed = false;
+    int a = voice->attack, d = voice->decay, s = voice->sustain, r = voice->release;
+    if (ImGui::SliderInt("Attack##ds", &a, 0, 255))  { voice->attack  = (uint8_t)a; changed = true; }
+    if (ImGui::SliderInt("Decay##ds",  &d, 0, 255))  { voice->decay   = (uint8_t)d; changed = true; }
+    if (ImGui::SliderInt("Sustain##ds",&s, 0, 255))  { voice->sustain = (uint8_t)s; changed = true; }
+    if (ImGui::SliderInt("Release##ds",&r, 0, 255))  { voice->release = (uint8_t)r; changed = true; }
+    return changed;
+}
+
+static bool edit_cgb_adsr(ToneData *voice)
+{
+    bool changed = false;
+    int a = voice->attack, d = voice->decay, s = voice->sustain, r = voice->release;
+    if (ImGui::SliderInt("Attack##cgb", &a, 0, 7))   { voice->attack  = (uint8_t)a; changed = true; }
+    if (ImGui::SliderInt("Decay##cgb",  &d, 0, 7))   { voice->decay   = (uint8_t)d; changed = true; }
+    if (ImGui::SliderInt("Sustain##cgb",&s, 0, 15))  { voice->sustain = (uint8_t)s; changed = true; }
+    if (ImGui::SliderInt("Release##cgb",&r, 0, 7))   { voice->release = (uint8_t)r; changed = true; }
+    return changed;
+}
 
 static void print_usage(const char *prog)
 {
@@ -266,6 +309,8 @@ static bool reload_voicegroup(PlayerApp *app)
     if (app->loadedVg)
         voicegroup_free(app->loadedVg);
     app->loadedVg = newVg;
+    memcpy(app->originalVoices, app->loadedVg->voices, sizeof(app->originalVoices));
+    memset(app->voiceOverrides, 0, sizeof(app->voiceOverrides));
     init_or_reset_engine_locked(app);
     if (app->timeline)
         reset_transport_locked(app, false);
@@ -311,6 +356,34 @@ static void apply_track_mute(PlayerApp *app, int trackIdx, bool muted)
     app->playback.trackMuted[trackIdx] = muted;
     if (!wasMuted && muted)
         m4a_engine_all_notes_off(&app->engine, trackIdx);
+}
+
+static void seek_transport_locked(PlayerApp *app, double seconds)
+{
+    if (!app->timeline || !app->loadedVg)
+        return;
+
+    if (seconds < 0.0)
+        seconds = 0.0;
+    if (app->playback.totalSeconds > 0.0 && seconds > app->playback.totalSeconds)
+        seconds = app->playback.totalSeconds;
+
+    const bool wasPlaying = app->playback.isPlaying;
+    const uint64_t targetSample = (uint64_t)(seconds * app->sampleRate + 0.5);
+
+    reset_transport_locked(app, false);
+    app->currentSample = targetSample > app->totalPlaybackSamples
+                       ? app->totalPlaybackSamples
+                       : targetSample;
+
+    while (app->nextEventIndex < app->timeline->count &&
+           app->timeline->events[app->nextEventIndex].samplePos <= app->currentSample) {
+        dispatch_event_locked(app, &app->timeline->events[app->nextEventIndex]);
+        app->nextEventIndex++;
+    }
+
+    app->playback.positionSeconds = (double)app->currentSample / app->sampleRate;
+    app->playback.isPlaying = wasPlaying && app->currentSample < app->totalPlaybackSamples;
 }
 
 static void render_general_tab(PlayerApp *app)
@@ -366,10 +439,19 @@ static void render_general_tab(PlayerApp *app)
 static void render_player_tab(PlayerApp *app)
 {
     ImGui::SeparatorText("MIDI File");
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90.0f);
+    const float buttonWidth = 80.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - (buttonWidth * 2.0f) - (spacing * 2.0f));
     ImGui::InputText("##midi", app->midiPathBuf, sizeof(app->midiPathBuf));
     ImGui::SameLine();
-    if (ImGui::Button("Load", ImVec2(80.0f, 0.0f))) {
+    if (ImGui::Button("Browse", ImVec2(buttonWidth, 0.0f))) {
+        char chosenPath[sizeof(app->midiPathBuf)];
+        if (choose_midi_file_dialog(chosenPath, sizeof(chosenPath))) {
+            snprintf(app->midiPathBuf, sizeof(app->midiPathBuf), "%s", chosenPath);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load", ImVec2(buttonWidth, 0.0f))) {
         load_midi(app, app->midiPathBuf);
     }
 
@@ -394,13 +476,27 @@ static void render_player_tab(PlayerApp *app)
         reset_transport_locked(app, true);
     }
 
-    float progress = 0.0f;
-    if (app->playback.totalSeconds > 0.0) {
-        progress = (float)(app->playback.positionSeconds / app->playback.totalSeconds);
-        if (progress < 0.0f) progress = 0.0f;
-        if (progress > 1.0f) progress = 1.0f;
+    ImGui::Spacing();
+
+    double playheadSeconds = app->playback.positionSeconds;
+    const double minSeconds = 0.0;
+    const double maxSeconds = app->playback.totalSeconds > 0.0
+                            ? app->playback.totalSeconds
+                            : 0.0;
+    const bool canSeek = app->playback.midiLoaded && app->playback.totalSeconds > 0.0;
+
+    ImGui::Text("Playhead");
+    if (!canSeek)
+        ImGui::BeginDisabled();
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::SliderScalar("##playhead", ImGuiDataType_Double,
+                            &playheadSeconds, &minSeconds, &maxSeconds,
+                            "%.2f s", ImGuiSliderFlags_NoRoundToFormat)) {
+        std::lock_guard<std::mutex> lock(app->mutex);
+        seek_transport_locked(app, playheadSeconds);
     }
-    ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f));
+    if (!canSeek)
+        ImGui::EndDisabled();
     ImGui::Text("%.2f / %.2f s", app->playback.positionSeconds, app->playback.totalSeconds);
 
     ImGui::Spacing();
@@ -440,6 +536,121 @@ static void render_player_tab(PlayerApp *app)
     }
 }
 
+static void render_voices_tab(PlayerApp *app)
+{
+    std::lock_guard<std::mutex> lock(app->mutex);
+
+    if (!app->loadedVg) {
+        ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.35f, 1.0f), "No voicegroup loaded");
+        return;
+    }
+
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+    ImGui::SliderInt("##voiceSlider", &app->selectedVoice, 0, 127);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0f);
+    ImGui::InputInt("##voiceInput", &app->selectedVoice, 1, 10);
+    if (app->selectedVoice < 0) app->selectedVoice = 0;
+    if (app->selectedVoice > 127) app->selectedVoice = 127;
+
+    int idx = app->selectedVoice;
+    ToneData *voice = &app->loadedVg->voices[idx];
+    uint8_t type = voice->type;
+
+    ImGui::Text("Type: %s (0x%02X)", voice_type_name(type), type);
+    if (type == VOICE_DIRECTSOUND_NO_RESAMPLE) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "[Fixed]");
+    }
+
+    if (app->voiceOverrides[idx]) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "(modified)");
+    }
+
+    ImGui::Separator();
+
+    bool changed = false;
+    uint8_t baseType = type & ~VOICE_TYPE_FIX;
+
+    if (baseType == 0x00) {
+        ImGui::Text("Key: %d", voice->key);
+        ImGui::Text("Pan/Sweep: %d (0x%02X)", voice->panSweep, voice->panSweep);
+        changed |= edit_directsound_adsr(voice);
+
+        if (voice->wav) {
+            ImGui::Spacing();
+            ImGui::SeparatorText("Sample Info");
+            ImGui::Text("Size: %u samples", voice->wav->size);
+            ImGui::Text("Frequency: %u Hz", voice->wav->freq);
+            ImGui::Text("Loop: %s (start: %u)",
+                        (voice->wav->status & 0x4000) ? "Yes" : "No",
+                        voice->wav->loopStart);
+        }
+    } else if (baseType == 0x01) {
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        int sweep = voice->panSweep;
+        if (ImGui::SliderInt("Sweep", &sweep, 0, 127)) { voice->panSweep = (uint8_t)sweep; changed = true; }
+        int duty = (int)(uintptr_t)voice->wavePointer & 0x03;
+        const char *dutyNames[] = { "12.5%", "25%", "50%", "75%" };
+        if (ImGui::Combo("Duty Cycle", &duty, dutyNames, 4)) {
+            voice->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
+            changed = true;
+        }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == 0x02) {
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        int duty = (int)(uintptr_t)voice->wavePointer & 0x03;
+        const char *dutyNames[] = { "12.5%", "25%", "50%", "75%" };
+        if (ImGui::Combo("Duty Cycle", &duty, dutyNames, 4)) {
+            voice->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
+            changed = true;
+        }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == 0x03) {
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == 0x04) {
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        int period = (int)(uintptr_t)voice->wavePointer & 0x01;
+        const char *periodNames[] = { "Normal (15-bit)", "Metallic (7-bit)" };
+        if (ImGui::Combo("Period", &period, periodNames, 2)) {
+            voice->wavePointer = (uint32_t *)(uintptr_t)(period & 0x01);
+            changed = true;
+        }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == VOICE_CRY || baseType == VOICE_CRY_REVERSE) {
+        ImGui::Text("Key: %d", voice->key);
+        ImGui::Text("Attack: %d  Decay: %d  Sustain: %d  Release: %d",
+                    voice->attack, voice->decay, voice->sustain, voice->release);
+        ImGui::TextDisabled("(Cry voices are read-only)");
+    } else if (baseType == VOICE_KEYSPLIT) {
+        ImGui::TextDisabled("(Keysplit voice - sub-voice editing not supported)");
+    } else if (baseType == VOICE_KEYSPLIT_ALL) {
+        ImGui::TextDisabled("(Drum Kit voice - sub-voice editing not supported)");
+    } else {
+        ImGui::TextDisabled("(Unknown voice type)");
+    }
+
+    if (changed) {
+        app->voiceOverrides[idx] = true;
+        m4a_engine_refresh_voices(&app->engine);
+    }
+
+    if (app->voiceOverrides[idx]) {
+        ImGui::Spacing();
+        if (ImGui::Button("Restore Original")) {
+            app->loadedVg->voices[idx] = app->originalVoices[idx];
+            app->voiceOverrides[idx] = false;
+            m4a_engine_refresh_voices(&app->engine);
+        }
+    }
+}
+
 static void render_ui(PlayerApp *app)
 {
     ImGui::Begin("poryaaaa Player");
@@ -450,6 +661,10 @@ static void render_ui(PlayerApp *app)
         }
         if (ImGui::BeginTabItem("Player")) {
             render_player_tab(app);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Voices")) {
+            render_voices_tab(app);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -465,6 +680,7 @@ static void glfw_error_callback(int error, const char *description)
 int main(int argc, char **argv)
 {
     PlayerApp app = {};
+    app.selectedVoice = 0;
     app.settings.songMasterVolume = 127;
     app.settings.maxPcmChannels = 5;
     app.sampleRate = 44100.0;
@@ -546,8 +762,8 @@ int main(int argc, char **argv)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
-    (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
