@@ -6,3 +6,5 @@ build_pugl/
 *.o
 *.d
 poryaaaa.cfg
+build-au-check/
+build-vst3-check/
