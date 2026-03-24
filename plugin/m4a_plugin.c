@@ -170,6 +170,109 @@ static void load_config_file(M4APluginData *data)
 
 /* ---- Plugin lifecycle ---- */
 
+/* Forward declaration: apply a parameter change to the engine */
+static void apply_param_value(M4APluginData *data, clap_id paramId, double value);
+static void flush_pending_param_events(M4APluginData *data,
+                                       const clap_output_events_t *out,
+                                       uint32_t time);
+
+static uint8_t clamp_param_value(clap_id paramId, double value)
+{
+    int v = (int)(value + 0.5);
+
+    switch (paramId) {
+    case PARAM_VOLUME:
+    case PARAM_PAN:
+    case PARAM_MOD_DEPTH:
+    case PARAM_LFO_SPEED:
+    case PARAM_REVERB:
+        if (v < 0) v = 0;
+        if (v > 127) v = 127;
+        break;
+    case PARAM_BEND_RANGE:
+        if (v < 1) v = 1;
+        if (v > 24) v = 24;
+        break;
+    default:
+        v = 0;
+        break;
+    }
+
+    return (uint8_t)v;
+}
+
+static double get_param_value(const M4APluginData *data, clap_id paramId)
+{
+    if (paramId >= PARAM_COUNT)
+        return 0.0;
+    return (double)atomic_load(&data->paramValues[paramId]);
+}
+
+static void queue_param_output(M4APluginData *data, clap_id paramId, uint8_t value,
+                               uint32_t eventFlags, bool withGesture)
+{
+    if (paramId >= PARAM_COUNT)
+        return;
+
+    atomic_store(&data->pendingParamValues[paramId], value);
+    atomic_fetch_or(&data->pendingParamEventFlags[paramId], eventFlags);
+    if (withGesture)
+        atomic_store(&data->pendingParamGestures[paramId], true);
+    atomic_store(&data->pendingParamOutputs[paramId], true);
+}
+
+static bool push_param_gesture_event(const clap_output_events_t *out, clap_id paramId,
+                                     uint32_t time, bool isBegin)
+{
+    if (!out || !out->try_push)
+        return false;
+
+    clap_event_param_gesture_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.header.size = sizeof(ev);
+    ev.header.time = time;
+    ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    ev.header.type = isBegin ? CLAP_EVENT_PARAM_GESTURE_BEGIN : CLAP_EVENT_PARAM_GESTURE_END;
+    ev.param_id = paramId;
+    return out->try_push(out, &ev.header);
+}
+
+static bool push_param_value_event(const clap_output_events_t *out, clap_id paramId,
+                                   double value, uint32_t time, uint32_t flags)
+{
+    if (!out || !out->try_push)
+        return false;
+
+    clap_event_param_value_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.header.size = sizeof(ev);
+    ev.header.time = time;
+    ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    ev.header.type = CLAP_EVENT_PARAM_VALUE;
+    ev.header.flags = flags;
+    ev.param_id = paramId;
+    ev.port_index = -1;
+    ev.channel = -1;
+    ev.key = -1;
+    ev.note_id = -1;
+    ev.value = value;
+    return out->try_push(out, &ev.header);
+}
+
+static void request_host_param_flush(M4APluginData *data)
+{
+    if (!data->host)
+        return;
+
+    const clap_host_params_t *hostParams =
+        (const clap_host_params_t *)data->host->get_extension(data->host, CLAP_EXT_PARAMS);
+    if (hostParams && hostParams->request_flush) {
+        hostParams->request_flush(data->host);
+    } else if (data->host->request_process) {
+        data->host->request_process(data->host);
+    }
+}
+
 static bool plugin_init(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
@@ -184,6 +287,20 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->activated = false;
     data->gui = NULL;
     data->guiTimerId = CLAP_INVALID_ID;
+    /* Default automation parameter values */
+    for (int i = 0; i < PARAM_COUNT; i++) {
+        atomic_init(&data->paramValues[i], 0);
+        atomic_init(&data->pendingParamValues[i], 0);
+        atomic_init(&data->pendingParamEventFlags[i], 0);
+        atomic_init(&data->pendingParamOutputs[i], false);
+        atomic_init(&data->pendingParamGestures[i], false);
+    }
+    atomic_store(&data->paramValues[PARAM_VOLUME], 127);
+    atomic_store(&data->paramValues[PARAM_PAN], 64);
+    atomic_store(&data->paramValues[PARAM_MOD_DEPTH], 0);
+    atomic_store(&data->paramValues[PARAM_BEND_RANGE], 2);
+    atomic_store(&data->paramValues[PARAM_LFO_SPEED], 0);
+    atomic_store(&data->paramValues[PARAM_REVERB], 0);
     /* Load defaults from config file placed next to the plugin */
     load_config_file(data);
     /* Forward the log path into the voicegroup loader so it can emit diagnostics */
@@ -214,6 +331,11 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     data->engine.analogFilter = data->analogFilter;
     data->engine.maxPcmChannels = data->maxPcmChannels;
     m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
+
+    /* Apply automation parameter defaults to track 0 */
+    atomic_store(&data->paramValues[PARAM_REVERB], data->reverbAmount);
+    for (int i = 0; i < PARAM_COUNT; i++)
+        apply_param_value(data, (clap_id)i, get_param_value(data, (clap_id)i));
 
     /* If voicegroup is configured, load it */
     if (data->projectRoot[0] && data->voicegroupName[0]) {
@@ -290,35 +412,276 @@ static void plugin_reset(const clap_plugin_t *plugin)
     data->engine.lowPassRight = 0.0f;
 }
 
+/* ---- Parameter helpers ---- */
+
+/* Apply a CLAP parameter change to the engine (audio-thread). */
+static void apply_param_value(M4APluginData *data, clap_id paramId, double value)
+{
+    if (paramId >= PARAM_COUNT)
+        return;
+    uint8_t v = clamp_param_value(paramId, value);
+    atomic_store(&data->paramValues[paramId], v);
+
+    switch (paramId) {
+    case PARAM_VOLUME:
+        m4a_engine_cc(&data->engine, 0, 0x7, v);
+        break;
+    case PARAM_PAN:
+        m4a_engine_cc(&data->engine, 0, 0xA, v);
+        break;
+    case PARAM_MOD_DEPTH:
+        m4a_engine_cc(&data->engine, 0, 0x1, v);
+        break;
+    case PARAM_BEND_RANGE:
+        m4a_engine_cc(&data->engine, 0, 0x14, v);
+        break;
+    case PARAM_LFO_SPEED:
+        m4a_engine_cc(&data->engine, 0, 0x15, v);
+        break;
+    case PARAM_REVERB:
+        data->reverbAmount = v;
+        m4a_reverb_set_amount(&data->engine.reverb, v);
+        break;
+    }
+}
+
+static clap_id param_id_from_cc(uint8_t cc)
+{
+    switch (cc) {
+    case 0x7:  return PARAM_VOLUME;
+    case 0xA:  return PARAM_PAN;
+    case 0x1:  return PARAM_MOD_DEPTH;
+    case 0x14: return PARAM_BEND_RANGE;
+    case 0x15: return PARAM_LFO_SPEED;
+    }
+
+    return CLAP_INVALID_ID;
+}
+
+static void flush_pending_param_events(M4APluginData *data,
+                                       const clap_output_events_t *out,
+                                       uint32_t time)
+{
+    for (clap_id paramId = 0; paramId < PARAM_COUNT; paramId++) {
+        if (!atomic_exchange(&data->pendingParamOutputs[paramId], false))
+            continue;
+
+        const uint8_t rawValue = atomic_load(&data->pendingParamValues[paramId]);
+        const uint32_t flags = atomic_exchange(&data->pendingParamEventFlags[paramId], 0);
+        const bool withGesture = atomic_exchange(&data->pendingParamGestures[paramId], false);
+
+        if (withGesture)
+            push_param_gesture_event(out, paramId, time, true);
+        if (!push_param_value_event(out, paramId, (double)rawValue, time, flags))
+            queue_param_output(data, paramId, rawValue, flags, withGesture);
+        else if (withGesture)
+            push_param_gesture_event(out, paramId, time, false);
+    }
+}
+
+/* Process input events that are CLAP parameter changes. */
+static void process_param_events(M4APluginData *data,
+                                 const clap_input_events_t *in,
+                                 const clap_output_events_t *out)
+{
+    const uint32_t count = in->size(in);
+    for (uint32_t i = 0; i < count; i++) {
+        const clap_event_header_t *hdr = in->get(in, i);
+        if (hdr->space_id != CLAP_CORE_EVENT_SPACE_ID)
+            continue;
+        if (hdr->type == CLAP_EVENT_PARAM_VALUE) {
+            const clap_event_param_value_t *ev = (const clap_event_param_value_t *)hdr;
+            apply_param_value(data, ev->param_id, ev->value);
+        }
+    }
+    flush_pending_param_events(data, out, 0);
+}
+
+/* ---- Params extension ---- */
+
+static uint32_t params_count(const clap_plugin_t *plugin)
+{
+    (void)plugin;
+    return PARAM_COUNT;
+}
+
+static bool params_get_info(const clap_plugin_t *plugin, uint32_t paramIndex,
+                            clap_param_info_t *info)
+{
+    (void)plugin;
+    memset(info, 0, sizeof(*info));
+    info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED | CLAP_PARAM_REQUIRES_PROCESS;
+
+    switch (paramIndex) {
+    case PARAM_VOLUME:
+        info->id = PARAM_VOLUME;
+        snprintf(info->name, sizeof(info->name), "Volume");
+        info->min_value     = 0;
+        info->max_value     = 127;
+        info->default_value = 127;
+        break;
+    case PARAM_PAN:
+        info->id = PARAM_PAN;
+        snprintf(info->name, sizeof(info->name), "Pan");
+        info->min_value     = 0;
+        info->max_value     = 127;
+        info->default_value = 64;
+        break;
+    case PARAM_MOD_DEPTH:
+        info->id = PARAM_MOD_DEPTH;
+        snprintf(info->name, sizeof(info->name), "Vibrato Depth");
+        info->min_value     = 0;
+        info->max_value     = 127;
+        info->default_value = 0;
+        break;
+    case PARAM_BEND_RANGE:
+        info->id = PARAM_BEND_RANGE;
+        snprintf(info->name, sizeof(info->name), "Bend Range");
+        info->min_value     = 1;
+        info->max_value     = 24;
+        info->default_value = 2;
+        break;
+    case PARAM_LFO_SPEED:
+        info->id = PARAM_LFO_SPEED;
+        snprintf(info->name, sizeof(info->name), "LFO Speed");
+        info->min_value     = 0;
+        info->max_value     = 127;
+        info->default_value = 0;
+        break;
+    case PARAM_REVERB:
+        info->id = PARAM_REVERB;
+        snprintf(info->name, sizeof(info->name), "Reverb");
+        info->min_value     = 0;
+        info->max_value     = 127;
+        info->default_value = 0;
+        break;
+    default:
+        return false;
+    }
+    return true;
+}
+
+static bool params_get_value(const clap_plugin_t *plugin, clap_id paramId, double *outValue)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    if (paramId >= PARAM_COUNT)
+        return false;
+    *outValue = get_param_value(data, paramId);
+    return true;
+}
+
+static bool params_value_to_text(const clap_plugin_t *plugin, clap_id paramId,
+                                 double value, char *outBuffer, uint32_t outBufferCapacity)
+{
+    (void)plugin;
+    int v = (int)(value + 0.5);
+
+    if (paramId == PARAM_PAN) {
+        int pan = v - 64;
+        if (pan < 0)
+            snprintf(outBuffer, outBufferCapacity, "L%d", -pan);
+        else if (pan > 0)
+            snprintf(outBuffer, outBufferCapacity, "R%d", pan);
+        else
+            snprintf(outBuffer, outBufferCapacity, "C");
+    } else if (paramId == PARAM_BEND_RANGE) {
+        snprintf(outBuffer, outBufferCapacity, "%d st", v);
+    } else {
+        snprintf(outBuffer, outBufferCapacity, "%d", v);
+    }
+    return true;
+}
+
+static bool params_text_to_value(const clap_plugin_t *plugin, clap_id paramId,
+                                 const char *text, double *outValue)
+{
+    (void)plugin;
+    if (!text || !outValue)
+        return false;
+
+    if (paramId == PARAM_PAN) {
+        if (text[0] == 'C' || text[0] == 'c') {
+            *outValue = clamp_param_value(paramId, 64);
+            return true;
+        }
+        if (text[0] == 'L' || text[0] == 'l') {
+            *outValue = clamp_param_value(paramId, 64 - atoi(text + 1));
+            return true;
+        }
+        if (text[0] == 'R' || text[0] == 'r') {
+            *outValue = clamp_param_value(paramId, 64 + atoi(text + 1));
+            return true;
+        }
+    }
+
+    *outValue = clamp_param_value(paramId, atof(text));
+    return true;
+}
+
+static void params_flush(const clap_plugin_t *plugin,
+                          const clap_input_events_t *in,
+                          const clap_output_events_t *out)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    process_param_events(data, in, out);
+}
+
+static const clap_plugin_params_t s_params = {
+    .count         = params_count,
+    .get_info      = params_get_info,
+    .get_value     = params_get_value,
+    .value_to_text = params_value_to_text,
+    .text_to_value = params_text_to_value,
+    .flush         = params_flush,
+};
+
 /* ---- MIDI event processing ---- */
 
-static void process_midi_event(M4APluginData *data, const uint8_t *msg)
+/*
+ * Single-instrument mode: all incoming MIDI is routed to track 0.
+ * The MIDI channel byte is ignored so the plugin behaves as one
+ * instrument instance per DAW track.
+ */
+static void process_midi_event(M4APluginData *data, const uint8_t *msg,
+                               const clap_output_events_t *out,
+                               uint32_t time, uint32_t eventFlags)
 {
     uint8_t status = msg[0] & 0xF0;
-    uint8_t channel = msg[0] & 0x0F;
 
     switch (status) {
     case 0x90: /* Note On */
         if (msg[2] > 0) {
-            m4a_engine_note_on(&data->engine, channel, msg[1], msg[2]);
+            m4a_engine_note_on(&data->engine, 0, msg[1], msg[2]);
         } else {
             /* velocity 0 = note off */
-            m4a_engine_note_off(&data->engine, channel, msg[1]);
+            m4a_engine_note_off(&data->engine, 0, msg[1]);
         }
         break;
     case 0x80: /* Note Off */
-        m4a_engine_note_off(&data->engine, channel, msg[1]);
+        m4a_engine_note_off(&data->engine, 0, msg[1]);
         break;
     case 0xC0: /* Program Change */
-        m4a_engine_program_change(&data->engine, channel, msg[1]);
+        m4a_engine_program_change(&data->engine, 0, msg[1]);
         break;
     case 0xB0: /* Control Change */
-        m4a_engine_cc(&data->engine, channel, msg[1], msg[2]);
+        m4a_engine_cc(&data->engine, 0, msg[1], msg[2]);
+        {
+            clap_id paramId = param_id_from_cc(msg[1]);
+            if (paramId != CLAP_INVALID_ID) {
+                atomic_store(&data->paramValues[paramId], clamp_param_value(paramId, msg[2]));
+                if (!push_param_value_event(out, paramId, get_param_value(data, paramId), time,
+                                            eventFlags | CLAP_EVENT_DONT_RECORD)) {
+                    queue_param_output(data, paramId,
+                                       (uint8_t)get_param_value(data, paramId),
+                                       eventFlags | CLAP_EVENT_DONT_RECORD, false);
+                }
+            }
+        }
         break;
     case 0xE0: /* Pitch Bend */
     {
         int16_t bend = ((int16_t)msg[2] << 7 | msg[1]) - 8192;
-        m4a_engine_pitch_bend(&data->engine, channel, bend);
+        m4a_engine_pitch_bend(&data->engine, 0, bend);
         break;
     }
     }
@@ -326,17 +689,14 @@ static void process_midi_event(M4APluginData *data, const uint8_t *msg)
 
 static void process_clap_note_event(M4APluginData *data, const clap_event_note_t *ev)
 {
-    int channel = ev->channel >= 0 ? ev->channel : 0;
-    if (channel >= MAX_TRACKS) channel = 0;
-
     if (ev->header.type == CLAP_EVENT_NOTE_ON) {
         uint8_t velocity = (uint8_t)(ev->velocity * 127.0 + 0.5);
         if (velocity == 0) velocity = 1;
-        m4a_engine_note_on(&data->engine, channel, (uint8_t)ev->key, velocity);
+        m4a_engine_note_on(&data->engine, 0, (uint8_t)ev->key, velocity);
     } else if (ev->header.type == CLAP_EVENT_NOTE_OFF) {
-        m4a_engine_note_off(&data->engine, channel, (uint8_t)ev->key);
+        m4a_engine_note_off(&data->engine, 0, (uint8_t)ev->key);
     } else if (ev->header.type == CLAP_EVENT_NOTE_CHOKE) {
-        m4a_engine_note_off(&data->engine, channel, (uint8_t)ev->key);
+        m4a_engine_note_off(&data->engine, 0, (uint8_t)ev->key);
     }
 }
 
@@ -381,10 +741,17 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
                 case CLAP_EVENT_NOTE_CHOKE:
                     process_clap_note_event(data, (const clap_event_note_t *)hdr);
                     break;
+                case CLAP_EVENT_PARAM_VALUE:
+                {
+                    const clap_event_param_value_t *pv = (const clap_event_param_value_t *)hdr;
+                    apply_param_value(data, pv->param_id, pv->value);
+                    break;
+                }
                 case CLAP_EVENT_MIDI:
                 {
                     const clap_event_midi_t *midiEv = (const clap_event_midi_t *)hdr;
-                    process_midi_event(data, midiEv->data);
+                    process_midi_event(data, midiEv->data, process->out_events,
+                                       hdr->time, hdr->flags & CLAP_EVENT_IS_LIVE);
                     break;
                 }
                 }
@@ -408,6 +775,8 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
 
         framePos = nextEventTime;
     }
+
+    flush_pending_param_events(data, process->out_events, 0);
 
     return CLAP_PROCESS_CONTINUE;
 }
@@ -480,12 +849,21 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     if (stream->write(stream, &analogFilterByte, 1) != 1) return false;
     if (stream->write(stream, &data->maxPcmChannels, 1) != 1) return false;
 
+    /* Automation parameter values (v2 state) */
+    for (int i = 0; i < PARAM_COUNT; i++) {
+        double v = get_param_value(data, (clap_id)i);
+        if (stream->write(stream, &v, sizeof(v)) != sizeof(v)) return false;
+    }
+
     return true;
 }
 
 static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    uint8_t prevParamValues[PARAM_COUNT];
+    for (int i = 0; i < PARAM_COUNT; i++)
+        prevParamValues[i] = (uint8_t)get_param_value(data, (clap_id)i);
 
     /* Snapshot current voicegroup identity to detect changes after load */
     char prevRoot[sizeof(data->projectRoot)];
@@ -506,6 +884,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     data->voicegroupName[nameLen] = '\0';
 
     if (stream->read(stream, &data->reverbAmount, 1) != 1) return false;
+    atomic_store(&data->paramValues[PARAM_REVERB], data->reverbAmount);
     if (stream->read(stream, &data->masterVolume, 1) != 1) return false;
     if (stream->read(stream, &data->songMasterVolume, 1) != 1) return false;
     /* analogFilter byte is optional (not present in older saves); default to enabled */
@@ -518,6 +897,15 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (maxChannelsByte < 1) maxChannelsByte = 1;
     if (maxChannelsByte > MAX_PCM_CHANNELS) maxChannelsByte = MAX_PCM_CHANNELS;
     data->maxPcmChannels = maxChannelsByte;
+
+    /* Automation parameter values (v2 state, optional for backward compat) */
+    {
+        double pv;
+        for (int i = 0; i < PARAM_COUNT; i++) {
+            if (stream->read(stream, &pv, sizeof(pv)) == sizeof(pv))
+                atomic_store(&data->paramValues[i], clamp_param_value((clap_id)i, pv));
+        }
+    }
 
     if (data->activated) {
         /* Only reload voicegroup if the project root or name actually changed */
@@ -541,6 +929,10 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         data->engine.analogFilter = data->analogFilter;
         data->engine.maxPcmChannels = data->maxPcmChannels;
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
+
+        /* Re-apply automation params to track 0 */
+        for (int i = 0; i < PARAM_COUNT; i++)
+            apply_param_value(data, (clap_id)i, get_param_value(data, (clap_id)i));
     }
 
     /* Push restored values into the GUI so it reflects the loaded state */
@@ -560,6 +952,20 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
             m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
         else
             m4a_gui_set_voice_data(data->gui, NULL, NULL, NULL);
+    }
+
+    bool paramValuesChanged = false;
+    for (int i = 0; i < PARAM_COUNT; i++) {
+        if (prevParamValues[i] != (uint8_t)get_param_value(data, (clap_id)i)) {
+            paramValuesChanged = true;
+            break;
+        }
+    }
+    if (paramValuesChanged) {
+        const clap_host_params_t *hostParams =
+            (const clap_host_params_t *)data->host->get_extension(data->host, CLAP_EXT_PARAMS);
+        if (hostParams && hostParams->rescan)
+            hostParams->rescan(data->host, CLAP_PARAM_RESCAN_VALUES);
     }
 
     return true;
@@ -841,6 +1247,13 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
         data->engine.maxPcmChannels = gs.maxPcmChannels;
     }
 
+    uint8_t reverbParamValue = (uint8_t)get_param_value(data, PARAM_REVERB);
+    if (gs.reverbAmount != reverbParamValue) {
+        atomic_store(&data->paramValues[PARAM_REVERB], gs.reverbAmount);
+        queue_param_output(data, PARAM_REVERB, gs.reverbAmount, CLAP_EVENT_IS_LIVE, true);
+        request_host_param_flush(data);
+    }
+
     if (reloadVoicegroup) {
         /* Update paths, then ask the host to deactivate/reactivate so the new
          * voicegroup is loaded cleanly from the audio thread's perspective. */
@@ -906,6 +1319,7 @@ static const void *plugin_get_extension(const clap_plugin_t *plugin, const char 
 {
     if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0)   return &s_audio_ports;
     if (strcmp(id, CLAP_EXT_NOTE_PORTS) == 0)    return &s_note_ports;
+    if (strcmp(id, CLAP_EXT_PARAMS) == 0)         return &s_params;
     if (strcmp(id, CLAP_EXT_STATE) == 0)          return &s_state;
     if (strcmp(id, CLAP_EXT_GUI) == 0)            return &s_gui;
     if (strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0)  return &s_timer_support;
