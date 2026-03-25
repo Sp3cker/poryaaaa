@@ -11,6 +11,7 @@
 #include "m4a_engine.h"
 #include "m4a_channel.h"
 #include "m4a_reverb.h"
+#include "m4a_standalone_player.h"
 #include "voicegroup_loader.h"
 #include "m4a_gui.h"
 
@@ -66,6 +67,8 @@ static const char *s_pluginLogPath = NULL;
  *   reverb         - Reverb amount (0-127)
  *   master_volume  - Master volume (0-15)
  *   analog_filter  - GBA analog output low-pass filter (0=off, 1=on)
+ *   midi           - Optional standalone MIDI file path
+ *   tail           - Optional standalone tail duration in seconds
  */
 static void load_config_file(M4APluginData *data)
 {
@@ -162,10 +165,78 @@ static void load_config_file(M4APluginData *data)
                          sizeof(data->loaderConfig.sampleDirs[idx]), "%s", tok);
                 tok = strtok(NULL, ";");
             }
+        } else if (strcmp(key, "midi") == 0) {
+            m4a_standalone_player_set_config(&data->player, value, data->player.tailSeconds);
+        } else if (strcmp(key, "tail") == 0) {
+            double v = atof(value);
+            if (v >= 0.0)
+                m4a_standalone_player_set_config(&data->player, data->player.midiPath, v);
         }
     }
 
     fclose(f);
+}
+
+static void push_state_to_gui(M4APluginData *data)
+{
+    if (!data->gui)
+        return;
+
+    M4AGuiSettings gs;
+    M4AGuiPlayerState playerState;
+    memset(&gs, 0, sizeof(gs));
+    snprintf(gs.projectRoot,    sizeof(gs.projectRoot),    "%s", data->projectRoot);
+    snprintf(gs.voicegroupName, sizeof(gs.voicegroupName), "%s", data->voicegroupName);
+    gs.reverbAmount     = data->reverbAmount;
+    gs.masterVolume     = data->masterVolume;
+    gs.songMasterVolume = data->songMasterVolume;
+    gs.analogFilter     = data->analogFilter;
+    gs.maxPcmChannels   = data->maxPcmChannels;
+    gs.voicegroupLoaded = (data->loadedVg != NULL);
+    m4a_gui_update_settings(data->gui, &gs);
+    m4a_standalone_player_fill_gui_state(&data->player, &playerState);
+    m4a_gui_set_player_state(data->gui, &playerState);
+    if (data->loadedVg)
+        m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
+    else
+        m4a_gui_set_voice_data(data->gui, NULL, NULL, NULL);
+}
+
+static bool reload_voicegroup(M4APluginData *data)
+{
+    if (!data)
+        return false;
+
+    if (data->activated)
+        m4a_engine_all_sound_off(&data->engine);
+
+    m4a_engine_set_voicegroup(&data->engine, NULL);
+
+    if (data->loadedVg) {
+        voicegroup_free(data->loadedVg);
+        data->loadedVg = NULL;
+    }
+
+    memset(data->originalVoices, 0, sizeof(data->originalVoices));
+    memset(data->voiceOverrides, 0, sizeof(data->voiceOverrides));
+
+    if (data->projectRoot[0] && data->voicegroupName[0]) {
+        data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
+                                         &data->loaderConfig);
+        if (data->loadedVg) {
+            m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
+            memcpy(data->originalVoices, data->loadedVg->voices, sizeof(data->originalVoices));
+        }
+    }
+
+    if (data->activated) {
+        m4a_standalone_player_on_activate(&data->player, &data->engine,
+                                          data->loadedVg ? data->loadedVg->voices : NULL,
+                                          data->engine.sampleRate);
+    }
+
+    push_state_to_gui(data);
+    return data->loadedVg != NULL;
 }
 
 /* ---- Plugin lifecycle ---- */
@@ -184,6 +255,11 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->activated = false;
     data->gui = NULL;
     data->guiTimerId = CLAP_INVALID_ID;
+#ifdef PORYAAAA_STANDALONE_APP
+    m4a_standalone_player_init(&data->player, true);
+#else
+    m4a_standalone_player_init(&data->player, false);
+#endif
     /* Load defaults from config file placed next to the plugin */
     load_config_file(data);
     /* Forward the log path into the voicegroup loader so it can emit diagnostics */
@@ -200,6 +276,7 @@ static void plugin_destroy(const clap_plugin_t *plugin)
         data->loadedVg = NULL;
     }
     m4a_engine_destroy(&data->engine);
+    m4a_standalone_player_destroy(&data->player);
     free(data);
     free((void *)plugin);
 }
@@ -208,6 +285,8 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
                             uint32_t min_frames, uint32_t max_frames)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    (void)min_frames;
+    (void)max_frames;
     m4a_engine_init(&data->engine, (float)sample_rate);
     data->engine.masterVolume = data->masterVolume;
     data->engine.songMasterVolume = data->songMasterVolume;
@@ -215,45 +294,8 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     data->engine.maxPcmChannels = data->maxPcmChannels;
     m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
 
-    /* If voicegroup is configured, load it */
-    if (data->projectRoot[0] && data->voicegroupName[0]) {
-        if (data->loadedVg) {
-            voicegroup_free(data->loadedVg);
-            data->loadedVg = NULL;
-        }
-        data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
-                                         &data->loaderConfig);
-        if (data->loadedVg) {
-            m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
-            memcpy(data->originalVoices, data->loadedVg->voices, sizeof(data->originalVoices));
-            memset(data->voiceOverrides, 0, sizeof(data->voiceOverrides));
-        }
-    }
-
     data->activated = true;
-
-    /* Update voice data pointers for the GUI */
-    if (data->gui) {
-        if (data->loadedVg)
-            m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
-        else
-            m4a_gui_set_voice_data(data->gui, NULL, NULL, NULL);
-    }
-
-    /* Notify GUI of current voicegroup status */
-    if (data->gui) {
-        M4AGuiSettings gs;
-        memset(&gs, 0, sizeof(gs));
-        snprintf(gs.projectRoot,    sizeof(gs.projectRoot),    "%s", data->projectRoot);
-        snprintf(gs.voicegroupName, sizeof(gs.voicegroupName), "%s", data->voicegroupName);
-        gs.reverbAmount      = data->reverbAmount;
-        gs.masterVolume      = data->masterVolume;
-        gs.songMasterVolume  = data->songMasterVolume;
-        gs.analogFilter      = data->analogFilter;
-        gs.maxPcmChannels    = data->maxPcmChannels;
-        gs.voicegroupLoaded  = (data->loadedVg != NULL);
-        m4a_gui_update_settings(data->gui, &gs);
-    }
+    reload_voicegroup(data);
 
     return true;
 }
@@ -279,6 +321,7 @@ static void plugin_stop_processing(const clap_plugin_t *plugin)
     m4a_reverb_reset(&data->engine.reverb);
     data->engine.lowPassLeft  = 0.0f;
     data->engine.lowPassRight = 0.0f;
+    data->player.isPlaying = false;
 }
 
 static void plugin_reset(const clap_plugin_t *plugin)
@@ -288,6 +331,7 @@ static void plugin_reset(const clap_plugin_t *plugin)
     m4a_reverb_reset(&data->engine.reverb);
     data->engine.lowPassLeft  = 0.0f;
     data->engine.lowPassRight = 0.0f;
+    data->player.isPlaying = false;
 }
 
 /* ---- MIDI event processing ---- */
@@ -356,6 +400,10 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         m4a_engine_set_tempo_bpm(&data->engine, process->transport->tempo);
     }
 
+    m4a_standalone_player_consume_actions(&data->player, &data->engine,
+                                          data->loadedVg ? data->loadedVg->voices : NULL,
+                                          data->engine.sampleRate);
+
     const uint32_t numFrames = process->frames_count;
     const uint32_t numEvents = process->in_events->size(process->in_events);
 
@@ -394,16 +442,23 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
 
         /* Determine how many frames to render before next event */
         uint32_t nextEventTime = numFrames;
+        uint32_t nextPlayerEventTime = numFrames;
+        m4a_standalone_player_dispatch_due_events(&data->player, &data->engine);
         if (eventIdx < numEvents) {
             const clap_event_header_t *hdr = process->in_events->get(process->in_events, eventIdx);
             if (hdr->time < nextEventTime)
                 nextEventTime = hdr->time;
         }
+        nextPlayerEventTime =
+            framePos + m4a_standalone_player_next_event_offset(&data->player, numFrames - framePos);
+        if (nextPlayerEventTime < nextEventTime)
+            nextEventTime = nextPlayerEventTime;
 
         uint32_t framesToRender = nextEventTime - framePos;
         if (framesToRender > 0) {
             m4a_engine_process(&data->engine, outL + framePos, outR + framePos,
                               (int)framesToRender);
+            m4a_standalone_player_advance(&data->player, framesToRender);
         }
 
         framePos = nextEventTime;
@@ -479,6 +534,11 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     uint8_t analogFilterByte = data->analogFilter ? 1 : 0;
     if (stream->write(stream, &analogFilterByte, 1) != 1) return false;
     if (stream->write(stream, &data->maxPcmChannels, 1) != 1) return false;
+    uint32_t midiLen = (uint32_t)strlen(data->player.midiPath);
+    if (stream->write(stream, &midiLen, sizeof(midiLen)) != sizeof(midiLen)) return false;
+    if (midiLen > 0 && stream->write(stream, data->player.midiPath, midiLen) != (int64_t)midiLen) return false;
+    if (stream->write(stream, &data->player.tailSeconds, sizeof(data->player.tailSeconds))
+        != sizeof(data->player.tailSeconds)) return false;
 
     return true;
 }
@@ -518,24 +578,27 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (maxChannelsByte < 1) maxChannelsByte = 1;
     if (maxChannelsByte > MAX_PCM_CHANNELS) maxChannelsByte = MAX_PCM_CHANNELS;
     data->maxPcmChannels = maxChannelsByte;
+    uint32_t midiLen = 0;
+    if (stream->read(stream, &midiLen, sizeof(midiLen)) == sizeof(midiLen)) {
+        if (midiLen >= sizeof(data->player.midiPath)) return false;
+        if (midiLen > 0
+            && stream->read(stream, data->player.midiPath, midiLen) != (int64_t)midiLen) return false;
+        data->player.midiPath[midiLen] = '\0';
+        double tailSeconds = data->player.tailSeconds;
+        if (stream->read(stream, &tailSeconds, sizeof(tailSeconds)) == sizeof(tailSeconds)
+            && tailSeconds >= 0.0) {
+            data->player.tailSeconds = tailSeconds;
+        }
+    }
 
-    if (data->activated) {
-        /* Only reload voicegroup if the project root or name actually changed */
+    {
         bool vgChanged = strcmp(data->projectRoot,    prevRoot) != 0 ||
                          strcmp(data->voicegroupName, prevName) != 0;
-        if (vgChanged && data->projectRoot[0] && data->voicegroupName[0]) {
-            if (data->loadedVg) {
-                voicegroup_free(data->loadedVg);
-                data->loadedVg = NULL;
-            }
-            data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
-                                             &data->loaderConfig);
-            if (data->loadedVg) {
-                m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
-                memcpy(data->originalVoices, data->loadedVg->voices, sizeof(data->originalVoices));
-                memset(data->voiceOverrides, 0, sizeof(data->voiceOverrides));
-            }
-        }
+        if (vgChanged)
+            reload_voicegroup(data);
+    }
+
+    if (data->activated) {
         data->engine.masterVolume = data->masterVolume;
         data->engine.songMasterVolume = data->songMasterVolume;
         data->engine.analogFilter = data->analogFilter;
@@ -543,24 +606,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
     }
 
-    /* Push restored values into the GUI so it reflects the loaded state */
-    if (data->gui) {
-        M4AGuiSettings gs;
-        memset(&gs, 0, sizeof(gs));
-        snprintf(gs.projectRoot,    sizeof(gs.projectRoot),    "%s", data->projectRoot);
-        snprintf(gs.voicegroupName, sizeof(gs.voicegroupName), "%s", data->voicegroupName);
-        gs.reverbAmount     = data->reverbAmount;
-        gs.masterVolume     = data->masterVolume;
-        gs.songMasterVolume = data->songMasterVolume;
-        gs.analogFilter     = data->analogFilter;
-        gs.maxPcmChannels   = data->maxPcmChannels;
-        gs.voicegroupLoaded = (data->loadedVg != NULL);
-        m4a_gui_update_settings(data->gui, &gs);
-        if (data->loadedVg)
-            m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
-        else
-            m4a_gui_set_voice_data(data->gui, NULL, NULL, NULL);
-    }
+    push_state_to_gui(data);
 
     return true;
 }
@@ -646,9 +692,7 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
         return false;
     }
 
-    /* Wire voice data pointers if voicegroup is already loaded */
-    if (data->loadedVg)
-        m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
+    push_state_to_gui(data);
 
     plugin_log("gui_create: success");
 
@@ -822,34 +866,43 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
 
     /* Apply any settings the user changed */
     M4AGuiSettings gs;
+    M4AGuiPlayerActions playerActions;
     bool reloadVoicegroup = false;
-    if (!m4a_gui_poll_changes(data->gui, &gs, &reloadVoicegroup))
+    bool settingsChanged = m4a_gui_poll_changes(data->gui, &gs, &reloadVoicegroup);
+    bool playerChanged = m4a_gui_poll_player_actions(data->gui, &playerActions);
+    if (!settingsChanged && !playerChanged) {
+        M4AGuiPlayerState playerState;
+        m4a_standalone_player_fill_gui_state(&data->player, &playerState);
+        m4a_gui_set_player_state(data->gui, &playerState);
         return;
-
-    /* Immediate audio settings - safe to write since they're byte-sized */
-    data->reverbAmount     = gs.reverbAmount;
-    data->masterVolume     = gs.masterVolume;
-    data->songMasterVolume = gs.songMasterVolume;
-    data->analogFilter     = gs.analogFilter;
-    data->maxPcmChannels   = gs.maxPcmChannels;
-
-    if (data->activated) {
-        data->engine.masterVolume = gs.masterVolume;
-        m4a_engine_set_song_volume(&data->engine, gs.songMasterVolume);
-        m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
-        data->engine.analogFilter = gs.analogFilter;
-        data->engine.maxPcmChannels = gs.maxPcmChannels;
     }
 
-    if (reloadVoicegroup) {
-        /* Update paths, then ask the host to deactivate/reactivate so the new
-         * voicegroup is loaded cleanly from the audio thread's perspective. */
+    if (playerChanged)
+        m4a_standalone_player_enqueue_actions(&data->player, &playerActions);
+
+    if (settingsChanged) {
+        /* Immediate audio settings - safe to write since they're byte-sized */
+        data->reverbAmount     = gs.reverbAmount;
+        data->masterVolume     = gs.masterVolume;
+        data->songMasterVolume = gs.songMasterVolume;
+        data->analogFilter     = gs.analogFilter;
+        data->maxPcmChannels   = gs.maxPcmChannels;
+
+        if (data->activated) {
+            data->engine.masterVolume = gs.masterVolume;
+            m4a_engine_set_song_volume(&data->engine, gs.songMasterVolume);
+            m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
+            data->engine.analogFilter = gs.analogFilter;
+            data->engine.maxPcmChannels = gs.maxPcmChannels;
+        }
+    }
+
+    if (settingsChanged && reloadVoicegroup) {
         snprintf(data->projectRoot,    sizeof(data->projectRoot),
                  "%s", gs.projectRoot);
         snprintf(data->voicegroupName, sizeof(data->voicegroupName),
                  "%s", gs.voicegroupName);
-        data->restartRequested = true;
-        data->host->request_restart(data->host);
+        reload_voicegroup(data);
     }
 
     /* Register this change with the host's undo stack.
@@ -860,23 +913,24 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
      * Fall back to mark_dirty() for hosts (e.g. Reaper) that don't implement
      * the draft extension. Per the CLAP spec, mark_dirty() creates an implicit
      * undo step as long as the plugin hasn't opted into CLAP_EXT_UNDO. */
-    const clap_host_undo_t *hostUndo =
-        (const clap_host_undo_t *)data->host->get_extension(data->host, CLAP_EXT_UNDO);
-    if (hostUndo && hostUndo->change_made) {
-        const char *name = reloadVoicegroup ? "M4A: Reload Voicegroup"
-                                            : "M4A: Settings Change";
-        hostUndo->change_made(data->host, name, NULL, 0, false);
-    } else {
-        const clap_host_state_t *hostState =
-            (const clap_host_state_t *)data->host->get_extension(data->host, CLAP_EXT_STATE);
-        if (hostState && hostState->mark_dirty)
-            hostState->mark_dirty(data->host);
+    if (settingsChanged) {
+        const clap_host_undo_t *hostUndo =
+            (const clap_host_undo_t *)data->host->get_extension(data->host, CLAP_EXT_UNDO);
+        if (hostUndo && hostUndo->change_made) {
+            const char *name = reloadVoicegroup ? "M4A: Reload Voicegroup"
+                                                : "M4A: Settings Change";
+            hostUndo->change_made(data->host, name, NULL, 0, false);
+        } else {
+            const clap_host_state_t *hostState =
+                (const clap_host_state_t *)data->host->get_extension(data->host, CLAP_EXT_STATE);
+            if (hostState && hostState->mark_dirty)
+                hostState->mark_dirty(data->host);
+        }
     }
 
     /* Reflect updated status back into the GUI (voicegroupLoaded may change
      * after request_restart completes, but update the rest immediately). */
-    gs.voicegroupLoaded = (data->loadedVg != NULL);
-    m4a_gui_update_settings(data->gui, &gs);
+    push_state_to_gui(data);
 }
 
 static const clap_plugin_timer_support_t s_timer_support = {

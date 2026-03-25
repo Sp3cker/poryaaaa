@@ -4,7 +4,59 @@
 
 #import <Cocoa/Cocoa.h>
 
-bool choose_midi_file_dialog(char *outPath, size_t outPathSize)
+static NSWindow *dialog_parent_window(uintptr_t parentView)
+{
+    if (!parentView)
+        return nil;
+
+    id obj = (__bridge id)(void *)parentView;
+    if ([obj isKindOfClass:[NSWindow class]])
+        return (NSWindow *)obj;
+    if ([obj isKindOfClass:[NSView class]])
+        return [(NSView *)obj window];
+    return nil;
+}
+
+static bool run_open_panel(NSOpenPanel *panel,
+                           uintptr_t parentView,
+                           char *outPath,
+                           size_t outPathSize)
+{
+    __block NSModalResponse response = NSModalResponseCancel;
+    __block NSURL *selectedURL = nil;
+    NSWindow *parentWindow = dialog_parent_window(parentView);
+
+    if (parentWindow) {
+        [panel beginSheetModalForWindow:parentWindow
+                      completionHandler:^(NSModalResponse modalResponse) {
+            response = modalResponse;
+            if (modalResponse == NSModalResponseOK)
+                selectedURL = [panel.URL copy];
+            [NSApp stopModalWithCode:modalResponse];
+        }];
+        [NSApp runModalForWindow:parentWindow];
+        [parentWindow endSheet:panel];
+    } else {
+        response = [panel runModal];
+        if (response == NSModalResponseOK)
+            selectedURL = [panel.URL copy];
+    }
+
+    if (response != NSModalResponseOK || !selectedURL)
+        return false;
+
+    const char *path = selectedURL.path.UTF8String;
+    if (!path) {
+        [selectedURL release];
+        return false;
+    }
+
+    snprintf(outPath, outPathSize, "%s", path);
+    [selectedURL release];
+    return true;
+}
+
+bool choose_midi_file_dialog(uintptr_t parentView, char *outPath, size_t outPathSize)
 {
     if (!outPath || outPathSize == 0)
         return false;
@@ -23,23 +75,11 @@ bool choose_midi_file_dialog(char *outPath, size_t outPathSize)
 #pragma clang diagnostic pop
         }
 
-        if ([panel runModal] != NSModalResponseOK)
-            return false;
-
-        NSURL *url = panel.URL;
-        if (!url)
-            return false;
-
-        const char *path = url.path.UTF8String;
-        if (!path)
-            return false;
-
-        snprintf(outPath, outPathSize, "%s", path);
-        return true;
+        return run_open_panel(panel, parentView, outPath, outPathSize);
     }
 }
 
-bool choose_directory_dialog(char *outPath, size_t outPathSize)
+bool choose_directory_dialog(uintptr_t parentView, char *outPath, size_t outPathSize)
 {
     if (!outPath || outPathSize == 0)
         return false;
@@ -50,19 +90,7 @@ bool choose_directory_dialog(char *outPath, size_t outPathSize)
         panel.canChooseDirectories = YES;
         panel.allowsMultipleSelection = NO;
 
-        if ([panel runModal] != NSModalResponseOK)
-            return false;
-
-        NSURL *url = panel.URL;
-        if (!url)
-            return false;
-
-        const char *path = url.path.UTF8String;
-        if (!path)
-            return false;
-
-        snprintf(outPath, outPathSize, "%s", path);
-        return true;
+        return run_open_panel(panel, parentView, outPath, outPathSize);
     }
 }
 

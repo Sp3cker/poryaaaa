@@ -4,6 +4,7 @@
 #include "m4a_engine.h"
 #include "voicegroup_loader.h"
 #include "m4a_gui.h"
+#include "m4a_standalone_player.h"
 #include <clap/clap.h>
 
 typedef struct {
@@ -31,6 +32,9 @@ typedef struct {
     /* Set when the plugin calls request_restart (e.g. after Reload).
      * The standalone polls this to perform the actual restart cycle. */
     bool restartRequested;
+
+    /* Standalone-only MIDI file player state used by poryaaaa_standalone. */
+    M4AStandalonePlayer player;
 } M4APluginData;
 
 #endif /* M4A_PLUGIN_H */

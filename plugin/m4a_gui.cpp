@@ -129,6 +129,13 @@ static void apply_project_selection(M4AGuiState *gui)
     gui->reloadRequested = true;
 }
 
+static uintptr_t dialog_parent_view(M4AGuiState *gui)
+{
+    if (!gui || !gui->view || !gui->realized)
+        return 0;
+    return (uintptr_t)puglGetNativeView(gui->view);
+}
+
 static double clamp_player_seek_seconds(double seconds, double totalSeconds)
 {
     if (seconds < 0.0)
@@ -200,7 +207,7 @@ static void render_general_tab(M4AGuiState *gui)
     ImGui::SameLine();
     if (ImGui::Button("Browse##root", ImVec2(80.0f, 0.0f))) {
         char chosenPath[sizeof(gui->projectRootBuf)];
-        if (choose_directory_dialog(chosenPath, sizeof(chosenPath))) {
+        if (choose_directory_dialog(dialog_parent_view(gui), chosenPath, sizeof(chosenPath))) {
             snprintf(gui->projectRootBuf, sizeof(gui->projectRootBuf), "%s", chosenPath);
             refresh_voicegroup_choices(gui, gui->projectRootBuf);
         }
@@ -418,10 +425,18 @@ static void render_player_tab(M4AGuiState *gui)
     }
 
     ImGui::SeparatorText("MIDI File");
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90.0f);
+    const float buttonWidth = 80.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - (buttonWidth * 2.0f) - (spacing * 2.0f));
     ImGui::InputText("##midiPath", gui->midiPathBuf, sizeof(gui->midiPathBuf));
     ImGui::SameLine();
-    if (ImGui::Button("Load", ImVec2(80.0f, 0.0f))) {
+    if (ImGui::Button("Browse", ImVec2(buttonWidth, 0.0f))) {
+        char chosenPath[sizeof(gui->midiPathBuf)];
+        if (choose_midi_file_dialog(dialog_parent_view(gui), chosenPath, sizeof(chosenPath)))
+            snprintf(gui->midiPathBuf, sizeof(gui->midiPathBuf), "%s", chosenPath);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load", ImVec2(buttonWidth, 0.0f))) {
         snprintf(gui->pendingPlayerActions.midiPath,
                  sizeof(gui->pendingPlayerActions.midiPath),
                  "%s", gui->midiPathBuf);
@@ -734,7 +749,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.FontGlobalScale = 1.2f;
+    io.FontGlobalScale = 1.9f;
 
     ImGui::StyleColorsDark();
 
@@ -867,7 +882,7 @@ bool m4a_gui_set_size(M4AGuiState *gui, uint32_t width, uint32_t height)
 {
     if (!gui || !gui->view) return false;
     gui_log("m4a_gui_set_size: %ux%u", width, height);
-    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, (PuglSpan)width, (PuglSpan)height);
+    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, (PuglSpan)width * 2, (PuglSpan)height * 2);
     return true;
 }
 

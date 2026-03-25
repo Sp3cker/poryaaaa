@@ -106,8 +106,10 @@ endif()
 
 set(PORYAAAA_PLUGIN_SOURCES
     plugin/m4a_plugin.c
+    plugin/m4a_standalone_player.c
     plugin/m4a_gui.cpp
     ${ENGINE_SOURCES}
+    ${MIDI_TIMELINE_SOURCES}
     ${IMGUI_SOURCES}
     ${PUGL_SOURCES}
     ${PORYAAAA_PLATFORM_DIALOG_SOURCES}
@@ -229,45 +231,6 @@ if(WIN32)
     target_link_libraries(poryaaaa_render PRIVATE -static-libgcc)
 endif()
 
-# ---- GUI Player ----
-add_executable(poryaaaa_player
-    cmd/poryaaaa_player.cpp
-    ${ENGINE_SOURCES}
-    ${MIDI_TIMELINE_SOURCES}
-    ${IMGUI_GLFW_SOURCES}
-    ${PORYAAAA_PLATFORM_DIALOG_SOURCES}
-)
-target_include_directories(poryaaaa_player PRIVATE
-    plugin
-    third_party
-    /opt/homebrew/opt/glfw/include
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
-)
-set_target_properties(poryaaaa_player PROPERTIES
-    LINKER_LANGUAGE CXX
-)
-target_link_libraries(poryaaaa_player PRIVATE m)
-
-if(UNIX AND NOT APPLE)
-    target_link_libraries(poryaaaa_player PRIVATE pthread dl GL glfw)
-endif()
-if(APPLE)
-    target_link_libraries(poryaaaa_player PRIVATE
-        /opt/homebrew/opt/glfw/lib/libglfw.3.dylib
-        "-framework OpenGL"
-        "-framework Cocoa"
-        "-framework CoreVideo"
-        "-framework IOKit"
-        "-framework CoreAudio"
-        "-framework AudioToolbox"
-        "-framework CoreFoundation"
-    )
-endif()
-if(WIN32)
-    target_link_libraries(poryaaaa_player PRIVATE opengl32 dwmapi -static-libgcc -static-libstdc++)
-endif()
-
 # ---- Unit Tests ----
 add_executable(poryaaaa_unit_tests
     test/test_engine.c
@@ -284,6 +247,7 @@ target_link_libraries(poryaaaa_unit_tests PRIVATE m)
 add_executable(poryaaaa-standalone ${PORYAAAA_PLUGIN_SOURCES})
 target_include_directories(poryaaaa-standalone PRIVATE ${PORYAAAA_PLUGIN_INCLUDE_DIRS})
 target_compile_definitions(poryaaaa-standalone PRIVATE ${PORYAAAA_APPLE_COMPILE_DEFINITIONS})
+target_compile_definitions(poryaaaa-standalone PRIVATE PORYAAAA_STANDALONE_APP=1)
 target_compile_options(poryaaaa-standalone PRIVATE ${PORYAAAA_APPLE_COMPILE_OPTIONS})
 set_target_properties(poryaaaa-standalone PROPERTIES
     LINKER_LANGUAGE CXX

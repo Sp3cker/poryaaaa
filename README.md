@@ -101,7 +101,7 @@ poryaaaa_standalone.exe
 - Adjust **Song Volume** and **Reverb** live.
 - Close the window to exit.
 
-The app reads `poryaaaa.cfg` on startup from the current working directory, or if none is present there, from next to the executable. CLI arguments still override config values. It uses the same format as the plugin, plus optional `midi`, `sample_rate`, and `tail` keys for the standalone player. Changes applied in the standalone UI are written back to that config file. See the [Plugin config reference](#plugin-config-reference) below.
+The app reads `poryaaaa.cfg` on startup from the current working directory, or if none is present there, from next to the executable. It uses the same format as the plugin, plus optional `midi` and `tail` keys for the standalone player. Standalone UI changes are stored in the wrapper's own saved state rather than written back to `poryaaaa.cfg`. See the [Plugin config reference](#plugin-config-reference) below.
 
 #### Sending MIDI on Windows
 
@@ -179,8 +179,7 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `reverb` | `0` | Reverb amount (0–127) |
 | `master_volume` | `15` | M4A master volume (0–15) |
 | `song_master_volume` | `127` | Song-level volume multiplier (0–127) |
-| `midi` | *(off)* | MIDI file loaded automatically by `poryaaaa_player` |
-| `sample_rate` | `44100` | Standalone player output sample rate |
+| `midi` | *(off)* | MIDI file loaded automatically by `poryaaaa_standalone` |
 | `tail` | `3.0` | Standalone player silence after the last MIDI event |
 | `sound_data_paths` | *(auto)* | Extra `.inc` files for sample symbols (semicolon-separated, relative to project root) |
 | `voicegroup_paths` | *(auto)* | Extra voicegroup search directories or files |
@@ -280,11 +279,12 @@ cmd/
 
 plugin/
   m4a_plugin.c/.h             CLAP entry point, MIDI event handling, extension dispatch
-  m4a_gui.cpp/.h              Dear ImGui + GLFW settings GUI (C++ with C interface)
+  m4a_gui.cpp/.h              Dear ImGui + Pugl settings GUI (C++ with C interface)
   m4a_engine.c/.h             Core engine: tick processing, channel allocation, MIDI routing
   m4a_channel.c/.h            PCM and CGB channel rendering, ADSR envelopes
   m4a_tables.c/.h             Frequency/scale tables (from m4a_tables.c)
   m4a_reverb.c/.h             Delay-based reverb effect
+  m4a_standalone_player.c/.h  Standalone MIDI-file transport shared by the wrapped plugin
   voicegroup_loader.c/.h      Project discovery, .inc/.s parser, sample loader
   standalone_main_win32.cpp   Custom Win32 entry point for the standalone executable
 
