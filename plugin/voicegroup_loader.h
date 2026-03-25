@@ -9,6 +9,7 @@ extern "C" {
 
 #define VOICEGROUP_SIZE 128
 #define VG_MAX_PATH_LEN 512
+#define VG_MAX_NAME_LEN 256
 
 /*
  * Optional configuration for the voicegroup loader.
@@ -52,6 +53,11 @@ typedef struct {
     int keySplitTableCapacity;
 } LoadedVoiceGroup;
 
+typedef struct {
+    char (*names)[VG_MAX_NAME_LEN];
+    int count;
+} VoicegroupNameList;
+
 /*
  * Load a voicegroup from a project.
  *
@@ -73,6 +79,19 @@ LoadedVoiceGroup *voicegroup_load(const char *projectRoot, const char *voicegrou
  * Free all resources associated with a loaded voicegroup.
  */
 void voicegroup_free(LoadedVoiceGroup *vg);
+
+/*
+ * Discover user-selectable voicegroup names under a project root.
+ * Returns an allocated list on success, or NULL on allocation failure.
+ * The caller must free the result with voicegroup_name_list_free().
+ */
+VoicegroupNameList *voicegroup_name_list_discover(const char *projectRoot,
+                                                  const VoicegroupLoaderConfig *config);
+
+/*
+ * Free a discovered voicegroup-name list.
+ */
+void voicegroup_name_list_free(VoicegroupNameList *list);
 
 /*
  * Set an optional file path for diagnostic logging inside the voicegroup loader.

@@ -101,7 +101,7 @@ poryaaaa_standalone.exe
 - Adjust **Song Volume** and **Reverb** live.
 - Close the window to exit.
 
-The app reads `poryaaaa.cfg` (located next to the executable) on startup as initial defaults, using the same format as the plugin. See the [Plugin config reference](#plugin-config-reference) below.
+The app reads `poryaaaa.cfg` on startup from the current working directory, or if none is present there, from next to the executable. CLI arguments still override config values. It uses the same format as the plugin, plus optional `midi`, `sample_rate`, and `tail` keys for the standalone player. Changes applied in the standalone UI are written back to that config file. See the [Plugin config reference](#plugin-config-reference) below.
 
 #### Sending MIDI on Windows
 
@@ -179,6 +179,9 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `reverb` | `0` | Reverb amount (0–127) |
 | `master_volume` | `15` | M4A master volume (0–15) |
 | `song_master_volume` | `127` | Song-level volume multiplier (0–127) |
+| `midi` | *(off)* | MIDI file loaded automatically by `poryaaaa_player` |
+| `sample_rate` | `44100` | Standalone player output sample rate |
+| `tail` | `3.0` | Standalone player silence after the last MIDI event |
 | `sound_data_paths` | *(auto)* | Extra `.inc` files for sample symbols (semicolon-separated, relative to project root) |
 | `voicegroup_paths` | *(auto)* | Extra voicegroup search directories or files |
 | `sample_dirs` | *(auto)* | Extra `.wav` sample search directories |

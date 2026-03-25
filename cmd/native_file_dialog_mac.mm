@@ -39,4 +39,31 @@ bool choose_midi_file_dialog(char *outPath, size_t outPathSize)
     }
 }
 
+bool choose_directory_dialog(char *outPath, size_t outPathSize)
+{
+    if (!outPath || outPathSize == 0)
+        return false;
+
+    @autoreleasepool {
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        panel.canChooseFiles = NO;
+        panel.canChooseDirectories = YES;
+        panel.allowsMultipleSelection = NO;
+
+        if ([panel runModal] != NSModalResponseOK)
+            return false;
+
+        NSURL *url = panel.URL;
+        if (!url)
+            return false;
+
+        const char *path = url.path.UTF8String;
+        if (!path)
+            return false;
+
+        snprintf(outPath, outPathSize, "%s", path);
+        return true;
+    }
+}
+
 #endif

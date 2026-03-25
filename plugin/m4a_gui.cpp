@@ -42,6 +42,8 @@ static void gui_log(const char *fmt, ...)
 /* Our C interface */
 #include "m4a_gui.h"
 #include "m4a_engine.h"
+#include "voicegroup_loader.h"
+#include "native_file_dialog.h"
 
 /* CLAP GUI extension (for notifying host when floating window closes) */
 #include <clap/ext/gui.h>
@@ -72,6 +74,7 @@ struct M4AGuiState {
     /* Editable text buffers (not applied until "Reload" is clicked) */
     char projectRootBuf[512];
     char voicegroupBuf[256];
+    VoicegroupNameList *voicegroupChoices;
 
     /* Pending change flags (cleared by poll_changes) */
     bool settingsChanged;
@@ -107,6 +110,23 @@ static void sync_buffers(M4AGuiState *gui)
              "%s", gui->settings.projectRoot);
     snprintf(gui->voicegroupBuf, sizeof(gui->voicegroupBuf),
              "%s", gui->settings.voicegroupName);
+}
+
+static void refresh_voicegroup_choices(M4AGuiState *gui, const char *projectRoot)
+{
+    if (!gui)
+        return;
+
+    voicegroup_name_list_free(gui->voicegroupChoices);
+    gui->voicegroupChoices = voicegroup_name_list_discover(projectRoot, NULL);
+}
+
+static void apply_project_selection(M4AGuiState *gui)
+{
+    snprintf(gui->settings.projectRoot, sizeof(gui->settings.projectRoot), "%s", gui->projectRootBuf);
+    snprintf(gui->settings.voicegroupName, sizeof(gui->settings.voicegroupName), "%s", gui->voicegroupBuf);
+    gui->settingsChanged = true;
+    gui->reloadRequested = true;
 }
 
 static double clamp_player_seek_seconds(double seconds, double totalSeconds)
@@ -171,8 +191,20 @@ static void render_general_tab(M4AGuiState *gui)
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Project Root:");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-1.0f);
+    {
+        const float buttonWidth = 80.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - buttonWidth - spacing);
+    }
     ImGui::InputText("##root", gui->projectRootBuf, sizeof(gui->projectRootBuf));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse##root", ImVec2(80.0f, 0.0f))) {
+        char chosenPath[sizeof(gui->projectRootBuf)];
+        if (choose_directory_dialog(chosenPath, sizeof(chosenPath))) {
+            snprintf(gui->projectRootBuf, sizeof(gui->projectRootBuf), "%s", chosenPath);
+            refresh_voicegroup_choices(gui, gui->projectRootBuf);
+        }
+    }
 
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Voicegroup:  ");
@@ -184,14 +216,40 @@ static void render_general_tab(M4AGuiState *gui)
     }
     ImGui::InputText("##vg", gui->voicegroupBuf, sizeof(gui->voicegroupBuf));
     ImGui::SameLine();
-    if (ImGui::Button("Reload", ImVec2(80, 0))) {
-        snprintf(gui->settings.projectRoot,    sizeof(gui->settings.projectRoot),
-                 "%s", gui->projectRootBuf);
-        snprintf(gui->settings.voicegroupName, sizeof(gui->settings.voicegroupName),
-                 "%s", gui->voicegroupBuf);
-        gui->settingsChanged = true;
-        gui->reloadRequested = true;
+    if (ImGui::Button("Reload", ImVec2(80, 0)))
+        apply_project_selection(gui);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("Available:   ");
+    ImGui::SameLine();
+    {
+        const float buttonWidth = 80.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - buttonWidth - spacing);
     }
+    const char *preview = gui->voicegroupBuf[0]
+        ? gui->voicegroupBuf
+        : ((gui->voicegroupChoices && gui->voicegroupChoices->count > 0)
+            ? "<select voicegroup>"
+            : "<no voicegroups found>");
+    if (ImGui::BeginCombo("##vgchoices", preview)) {
+        if (gui->voicegroupChoices) {
+            for (int i = 0; i < gui->voicegroupChoices->count; i++) {
+                const char *name = gui->voicegroupChoices->names[i];
+                const bool selected = strcmp(name, gui->voicegroupBuf) == 0;
+                if (ImGui::Selectable(name, selected)) {
+                    snprintf(gui->voicegroupBuf, sizeof(gui->voicegroupBuf), "%s", name);
+                    apply_project_selection(gui);
+                }
+                if (selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh##vg", ImVec2(80.0f, 0.0f)))
+        refresh_voicegroup_choices(gui, gui->projectRootBuf);
 
     /* Voicegroup load status */
     ImGui::AlignTextToFramePadding();
@@ -634,6 +692,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
         gui->settings.songMasterVolume = 127;
     }
     sync_buffers(gui);
+    refresh_voicegroup_choices(gui, gui->settings.projectRoot);
 
     /* Create Pugl world and view */
     gui->world = puglNewWorld(host ? PUGL_MODULE : PUGL_PROGRAM, 0);
@@ -733,6 +792,9 @@ void m4a_gui_destroy(M4AGuiState *gui)
         gui->world = nullptr;
     }
 
+    voicegroup_name_list_free(gui->voicegroupChoices);
+    gui->voicegroupChoices = nullptr;
+
     delete gui;
     gui_log("m4a_gui_destroy: done");
 }
@@ -817,8 +879,11 @@ bool m4a_gui_can_resize(M4AGuiState *gui)
 void m4a_gui_update_settings(M4AGuiState *gui, const M4AGuiSettings *settings)
 {
     if (!gui || !settings) return;
+    bool projectRootChanged = strcmp(gui->settings.projectRoot, settings->projectRoot) != 0;
     gui->settings = *settings;
     sync_buffers(gui);
+    if (projectRootChanged)
+        refresh_voicegroup_choices(gui, gui->settings.projectRoot);
 }
 
 bool m4a_gui_poll_changes(M4AGuiState *gui, M4AGuiSettings *out, bool *reload_voicegroup)

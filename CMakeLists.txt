@@ -94,16 +94,28 @@ set(MIDI_TIMELINE_SOURCES
     plugin/midi_timeline.c
 )
 
+set(PORYAAAA_PLATFORM_DIALOG_SOURCES
+    cmd/native_file_dialog_stub.cpp
+)
+
+if(APPLE)
+    list(APPEND PORYAAAA_PLATFORM_DIALOG_SOURCES
+        cmd/native_file_dialog_mac.mm
+    )
+endif()
+
 set(PORYAAAA_PLUGIN_SOURCES
     plugin/m4a_plugin.c
     plugin/m4a_gui.cpp
     ${ENGINE_SOURCES}
     ${IMGUI_SOURCES}
     ${PUGL_SOURCES}
+    ${PORYAAAA_PLATFORM_DIALOG_SOURCES}
 )
 
 set(PORYAAAA_PLUGIN_INCLUDE_DIRS
     plugin
+    cmd
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
     ${PUGL_DIR}/include
@@ -220,10 +232,10 @@ endif()
 # ---- GUI Player ----
 add_executable(poryaaaa_player
     cmd/poryaaaa_player.cpp
-    cmd/native_file_dialog_stub.cpp
     ${ENGINE_SOURCES}
     ${MIDI_TIMELINE_SOURCES}
     ${IMGUI_GLFW_SOURCES}
+    ${PORYAAAA_PLATFORM_DIALOG_SOURCES}
 )
 target_include_directories(poryaaaa_player PRIVATE
     plugin
@@ -241,7 +253,6 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(poryaaaa_player PRIVATE pthread dl GL glfw)
 endif()
 if(APPLE)
-    target_sources(poryaaaa_player PRIVATE cmd/native_file_dialog_mac.mm)
     target_link_libraries(poryaaaa_player PRIVATE
         /opt/homebrew/opt/glfw/lib/libglfw.3.dylib
         "-framework OpenGL"

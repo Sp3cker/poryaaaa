@@ -65,6 +65,12 @@ typedef struct {
 } ProjectDiscovery;
 
 typedef struct {
+    char (*names)[VG_MAX_NAME_LEN];
+    int count;
+    int capacity;
+} VoicegroupNameArray;
+
+typedef struct {
     char filePath[MAX_PATH_LEN];
     char label[MAX_SYMBOL_LEN];  /* non-empty if inside a monolithic file */
     int found;
@@ -215,6 +221,50 @@ static void pathlist_add(PathList *list, const char *path)
     strncpy(list->paths[list->count], path, MAX_PATH_LEN - 1);
     list->paths[list->count][MAX_PATH_LEN - 1] = '\0';
     list->count++;
+}
+
+static int string_casecmp(const char *a, const char *b)
+{
+    while (*a && *b) {
+        const int ca = tolower((unsigned char)*a);
+        const int cb = tolower((unsigned char)*b);
+        if (ca != cb)
+            return ca - cb;
+        a++;
+        b++;
+    }
+    return tolower((unsigned char)*a) - tolower((unsigned char)*b);
+}
+
+static int voicegroup_name_cmp(const void *a, const void *b)
+{
+    return string_casecmp((const char *)a, (const char *)b);
+}
+
+static int voicegroup_name_array_push(VoicegroupNameArray *list, const char *name)
+{
+    if (!name || !name[0])
+        return 0;
+
+    for (int i = 0; i < list->count; i++) {
+        if (strcmp(list->names[i], name) == 0)
+            return 0;
+    }
+
+    if (list->count >= list->capacity) {
+        const int newCapacity = list->capacity ? list->capacity * 2 : 64;
+        char (*newNames)[VG_MAX_NAME_LEN] =
+            realloc(list->names, (size_t)newCapacity * sizeof(*newNames));
+        if (!newNames)
+            return -1;
+        list->names = newNames;
+        list->capacity = newCapacity;
+    }
+
+    strncpy(list->names[list->count], name, VG_MAX_NAME_LEN - 1);
+    list->names[list->count][VG_MAX_NAME_LEN - 1] = '\0';
+    list->count++;
+    return 0;
 }
 
 /* Helper: check if a string ends with a given suffix (case-insensitive) */
@@ -1214,6 +1264,121 @@ static int dir_last_component_is(const char *dirPath, const char *name)
     if (tail == dirPath) return 1;
     char c = *(tail - 1);
     return c == '/' || c == '\\';
+}
+
+static int collect_voicegroup_names_from_dir(VoicegroupNameArray *list, const char *dirPath)
+{
+    if (dir_last_component_is(dirPath, "keysplits") || dir_last_component_is(dirPath, "drumsets"))
+        return 0;
+
+    DIR *dir = opendir(dirPath);
+    if (!dir)
+        return 0;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] == '.')
+            continue;
+        if (!str_ends_with_ci(ent->d_name, ".inc") && !str_ends_with_ci(ent->d_name, ".s"))
+            continue;
+
+        char fullPath[MAX_PATH_LEN];
+        snprintf(fullPath, sizeof(fullPath), "%s%c%s", dirPath, PATH_SEP, ent->d_name);
+        if (is_monolithic_voicegroup_file(fullPath))
+            continue;
+
+        char name[VG_MAX_NAME_LEN];
+        strncpy(name, ent->d_name, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+
+        char *dot = strrchr(name, '.');
+        if (dot)
+            *dot = '\0';
+
+        const char *displayName = name;
+        if (strncmp(displayName, "vg_", 3) == 0 && displayName[3] != '\0')
+            displayName += 3;
+
+        if (voicegroup_name_array_push(list, displayName) < 0) {
+            closedir(dir);
+            return -1;
+        }
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+static int collect_voicegroup_names_from_monolithic_file(VoicegroupNameArray *list, const char *filePath)
+{
+    FILE *f = fopen(filePath, "r");
+    if (!f)
+        return 0;
+
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), f)) {
+        strip_comment(line);
+        rtrim(line);
+        char *trimmed = ltrim(line);
+        char *label = strstr(trimmed, "::");
+        if (!label || label == trimmed || trimmed[0] == '.')
+            continue;
+
+        *label = '\0';
+        if (voicegroup_name_array_push(list, trimmed) < 0) {
+            fclose(f);
+            return -1;
+        }
+    }
+
+    fclose(f);
+    return 0;
+}
+
+VoicegroupNameList *voicegroup_name_list_discover(const char *projectRoot,
+                                                  const VoicegroupLoaderConfig *config)
+{
+    VoicegroupNameList *result = calloc(1, sizeof(*result));
+    if (!result)
+        return NULL;
+
+    if (!projectRoot || !projectRoot[0])
+        return result;
+
+    ProjectDiscovery disc;
+    discover_project(projectRoot, config, &disc);
+
+    VoicegroupNameArray names = {0};
+
+    for (int i = 0; i < disc.voicegroupDirs.count; i++) {
+        if (collect_voicegroup_names_from_dir(&names, disc.voicegroupDirs.paths[i]) < 0)
+            goto fail;
+    }
+
+    for (int i = 0; i < disc.monolithicVGFiles.count; i++) {
+        if (collect_voicegroup_names_from_monolithic_file(&names, disc.monolithicVGFiles.paths[i]) < 0)
+            goto fail;
+    }
+
+    if (names.count > 1)
+        qsort(names.names, (size_t)names.count, sizeof(*names.names), voicegroup_name_cmp);
+
+    result->names = names.names;
+    result->count = names.count;
+    return result;
+
+fail:
+    free(names.names);
+    free(result);
+    return NULL;
+}
+
+void voicegroup_name_list_free(VoicegroupNameList *list)
+{
+    if (!list)
+        return;
+    free(list->names);
+    free(list);
 }
 
 /*

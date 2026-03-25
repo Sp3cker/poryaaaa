@@ -9,4 +9,11 @@ bool choose_midi_file_dialog(char *outPath, size_t outPathSize)
     return false;
 }
 
+bool choose_directory_dialog(char *outPath, size_t outPathSize)
+{
+    (void)outPath;
+    (void)outPathSize;
+    return false;
+}
+
 #endif

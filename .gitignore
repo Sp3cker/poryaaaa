@@ -8,3 +8,4 @@ build_pugl/
 poryaaaa.cfg
 build-au-check/
 build-vst3-check/
+.cache

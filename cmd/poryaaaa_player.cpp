@@ -4,7 +4,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -52,6 +56,9 @@ typedef struct {
     char projectRootBuf[512];
     char voicegroupBuf[256];
     char midiPathBuf[512];
+    char configPath[1024];
+    char configMidiPath[512];
+    VoicegroupNameList *voicegroupChoices;
 
     M4AEngine engine;
     bool engineInitialized;
@@ -75,6 +82,127 @@ typedef struct {
     float scratchL[4096];
     float scratchR[4096];
 } PlayerApp;
+
+static bool reload_voicegroup(PlayerApp *app);
+
+static bool file_exists(const char *path)
+{
+    if (!path || !path[0])
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    fclose(f);
+    return true;
+}
+
+static void trim_trailing_whitespace(char *s)
+{
+    size_t len = strlen(s);
+    while (len > 0) {
+        const char c = s[len - 1];
+        if (c != '\n' && c != '\r' && c != ' ' && c != '\t')
+            break;
+        s[--len] = '\0';
+    }
+}
+
+static char *trim_leading_whitespace(char *s)
+{
+    while (*s == ' ' || *s == '\t')
+        s++;
+    return s;
+}
+
+static void load_config_file(PlayerApp *app, const char *configPath,
+                             char *startupMidiPath, size_t startupMidiPathSize)
+{
+    if (!configPath || !configPath[0])
+        return;
+
+    FILE *f = fopen(configPath, "r");
+    if (!f)
+        return;
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        trim_trailing_whitespace(line);
+        char *trimmed = trim_leading_whitespace(line);
+        if (trimmed[0] == '#' || trimmed[0] == '\0')
+            continue;
+
+        char *eq = strchr(trimmed, '=');
+        if (!eq)
+            continue;
+        *eq = '\0';
+
+        char *key = trim_leading_whitespace(trimmed);
+        char *value = trim_leading_whitespace(eq + 1);
+        trim_trailing_whitespace(key);
+        trim_trailing_whitespace(value);
+
+        if (strcmp(key, "project_root") == 0) {
+            snprintf(app->settings.projectRoot, sizeof(app->settings.projectRoot), "%s", value);
+        } else if (strcmp(key, "voicegroup") == 0) {
+            snprintf(app->settings.voicegroupName, sizeof(app->settings.voicegroupName), "%s", value);
+        } else if (strcmp(key, "reverb") == 0) {
+            int v = atoi(value);
+            if (v < 0) v = 0;
+            if (v > 127) v = 127;
+            app->settings.reverbAmount = (uint8_t)v;
+        } else if (strcmp(key, "song_master_volume") == 0) {
+            int v = atoi(value);
+            if (v < 0) v = 0;
+            if (v > 127) v = 127;
+            app->settings.songMasterVolume = (uint8_t)v;
+        } else if (strcmp(key, "analog_filter") == 0) {
+            app->settings.analogFilter = (atoi(value) != 0);
+        } else if (strcmp(key, "max_channels") == 0) {
+            int v = atoi(value);
+            if (v < 1) v = 1;
+            if (v > MAX_PCM_CHANNELS) v = MAX_PCM_CHANNELS;
+            app->settings.maxPcmChannels = (uint8_t)v;
+        } else if (strcmp(key, "sample_rate") == 0) {
+            int v = atoi(value);
+            if (v >= 8000)
+                app->sampleRate = (double)v;
+        } else if (strcmp(key, "tail") == 0) {
+            double v = atof(value);
+            if (v >= 0.0)
+                app->tailSeconds = v;
+        } else if (strcmp(key, "midi") == 0 && startupMidiPath && startupMidiPathSize > 0 && value[0]) {
+            snprintf(app->configMidiPath, sizeof(app->configMidiPath), "%s", value);
+            snprintf(startupMidiPath, startupMidiPathSize, "%s", value);
+        }
+    }
+
+    fclose(f);
+}
+
+static void resolve_config_path(char *outPath, size_t outPathSize, const char *argv0)
+{
+    outPath[0] = '\0';
+
+    if (file_exists("poryaaaa.cfg")) {
+        snprintf(outPath, outPathSize, "%s", "poryaaaa.cfg");
+        return;
+    }
+
+    if (!argv0 || !argv0[0])
+        return;
+
+    std::error_code ec;
+    std::filesystem::path exePath = std::filesystem::absolute(argv0, ec);
+    if (ec)
+        return;
+
+    std::filesystem::path cfgPath = exePath.parent_path() / "poryaaaa.cfg";
+    const std::string cfgString = cfgPath.string();
+    if (!file_exists(cfgString.c_str()))
+        return;
+
+    snprintf(outPath, outPathSize, "%s", cfgString.c_str());
+}
 
 static const char *voice_type_name(uint8_t type)
 {
@@ -120,6 +248,9 @@ static void print_usage(const char *prog)
     fprintf(stderr,
             "Usage: %s [project_root] [voicegroup] [options]\n"
             "\n"
+            "Defaults may be loaded from poryaaaa.cfg in the current working\n"
+            "directory or next to the executable.\n"
+            "\n"
             "Options:\n"
             "  --midi <file.mid>        Load a MIDI file on startup\n"
             "  --song-volume <0-127>    Song master volume (default: 127)\n"
@@ -155,6 +286,101 @@ static void sync_input_buffers(PlayerApp *app)
     snprintf(app->projectRootBuf, sizeof(app->projectRootBuf), "%s", app->settings.projectRoot);
     snprintf(app->voicegroupBuf, sizeof(app->voicegroupBuf), "%s", app->settings.voicegroupName);
     snprintf(app->midiPathBuf, sizeof(app->midiPathBuf), "%s", app->playback.midiPath);
+}
+
+static void refresh_voicegroup_choices(PlayerApp *app, const char *projectRoot)
+{
+    voicegroup_name_list_free(app->voicegroupChoices);
+    app->voicegroupChoices = voicegroup_name_list_discover(projectRoot, NULL);
+}
+
+static bool line_matches_key(const std::string &line, const char *key)
+{
+    const size_t pos = line.find('=');
+    if (pos == std::string::npos)
+        return false;
+
+    size_t start = 0;
+    while (start < pos && (line[start] == ' ' || line[start] == '\t'))
+        start++;
+
+    size_t end = pos;
+    while (end > start && (line[end - 1] == ' ' || line[end - 1] == '\t'))
+        end--;
+
+    return line.compare(start, end - start, key) == 0;
+}
+
+static void upsert_config_line(std::vector<std::string> *lines, const char *key, const char *value)
+{
+    const std::string entry = std::string(key) + "=" + (value ? value : "");
+    for (std::string &line : *lines) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        if (line_matches_key(line, key)) {
+            line = entry;
+            return;
+        }
+    }
+    lines->push_back(entry);
+}
+
+static void save_config_file(const PlayerApp *app)
+{
+    if (!app || !app->configPath[0])
+        return;
+
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(app->configPath);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+
+    upsert_config_line(&lines, "project_root", app->settings.projectRoot);
+    upsert_config_line(&lines, "voicegroup", app->settings.voicegroupName);
+
+    char numberBuf[64];
+
+    snprintf(numberBuf, sizeof(numberBuf), "%u", (unsigned)app->settings.reverbAmount);
+    upsert_config_line(&lines, "reverb", numberBuf);
+
+    snprintf(numberBuf, sizeof(numberBuf), "%u", (unsigned)app->settings.songMasterVolume);
+    upsert_config_line(&lines, "song_master_volume", numberBuf);
+
+    snprintf(numberBuf, sizeof(numberBuf), "%u", app->settings.analogFilter ? 1U : 0U);
+    upsert_config_line(&lines, "analog_filter", numberBuf);
+
+    snprintf(numberBuf, sizeof(numberBuf), "%u", (unsigned)app->settings.maxPcmChannels);
+    upsert_config_line(&lines, "max_channels", numberBuf);
+
+    snprintf(numberBuf, sizeof(numberBuf), "%.0f", app->sampleRate);
+    upsert_config_line(&lines, "sample_rate", numberBuf);
+
+    snprintf(numberBuf, sizeof(numberBuf), "%.3f", app->tailSeconds);
+    upsert_config_line(&lines, "tail", numberBuf);
+
+    upsert_config_line(&lines, "midi", app->configMidiPath);
+
+    std::ofstream out(app->configPath, std::ios::trunc);
+    if (!out)
+        return;
+
+    for (size_t i = 0; i < lines.size(); i++) {
+        out << lines[i];
+        if (i + 1 < lines.size())
+            out << '\n';
+    }
+}
+
+static void apply_project_selection(PlayerApp *app)
+{
+    snprintf(app->settings.projectRoot, sizeof(app->settings.projectRoot), "%s", app->projectRootBuf);
+    snprintf(app->settings.voicegroupName, sizeof(app->settings.voicegroupName), "%s", app->voicegroupBuf);
+    refresh_voicegroup_choices(app, app->settings.projectRoot);
+    reload_voicegroup(app);
+    save_config_file(app);
 }
 
 static void apply_engine_settings(PlayerApp *app)
@@ -345,7 +571,9 @@ static bool load_midi(PlayerApp *app, const char *path)
                               + (uint64_t)(app->tailSeconds * app->sampleRate + 0.5);
     app->playback.midiLoaded = true;
     app->playback.totalSeconds = (double)app->totalPlaybackSamples / app->sampleRate;
+    snprintf(app->configMidiPath, sizeof(app->configMidiPath), "%s", path);
     reset_transport_locked(app, false);
+    save_config_file(app);
     return true;
 }
 
@@ -391,18 +619,58 @@ static void render_general_tab(PlayerApp *app)
     ImGui::SeparatorText("Project Settings");
 
     ImGui::Text("Project Root");
-    ImGui::SetNextItemWidth(-1.0f);
+    {
+        const float buttonWidth = 80.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - buttonWidth - spacing);
+    }
     ImGui::InputText("##root", app->projectRootBuf, sizeof(app->projectRootBuf));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse##root", ImVec2(80.0f, 0.0f))) {
+        char chosenPath[sizeof(app->projectRootBuf)];
+        if (choose_directory_dialog(chosenPath, sizeof(chosenPath))) {
+            snprintf(app->projectRootBuf, sizeof(app->projectRootBuf), "%s", chosenPath);
+            refresh_voicegroup_choices(app, app->projectRootBuf);
+        }
+    }
 
     ImGui::Text("Voicegroup");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90.0f);
     ImGui::InputText("##voicegroup", app->voicegroupBuf, sizeof(app->voicegroupBuf));
     ImGui::SameLine();
     if (ImGui::Button("Reload", ImVec2(80.0f, 0.0f))) {
-        snprintf(app->settings.projectRoot, sizeof(app->settings.projectRoot), "%s", app->projectRootBuf);
-        snprintf(app->settings.voicegroupName, sizeof(app->settings.voicegroupName), "%s", app->voicegroupBuf);
-        reload_voicegroup(app);
+        apply_project_selection(app);
     }
+
+    ImGui::Text("Available");
+    {
+        const float buttonWidth = 80.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - buttonWidth - spacing);
+    }
+    const char *preview = app->voicegroupBuf[0]
+        ? app->voicegroupBuf
+        : ((app->voicegroupChoices && app->voicegroupChoices->count > 0)
+            ? "<select voicegroup>"
+            : "<no voicegroups found>");
+    if (ImGui::BeginCombo("##voicegroupChoices", preview)) {
+        if (app->voicegroupChoices) {
+            for (int i = 0; i < app->voicegroupChoices->count; i++) {
+                const char *name = app->voicegroupChoices->names[i];
+                const bool selected = strcmp(name, app->voicegroupBuf) == 0;
+                if (ImGui::Selectable(name, selected)) {
+                    snprintf(app->voicegroupBuf, sizeof(app->voicegroupBuf), "%s", name);
+                    apply_project_selection(app);
+                }
+                if (selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh##voicegroup", ImVec2(80.0f, 0.0f)))
+        refresh_voicegroup_choices(app, app->projectRootBuf);
 
     ImGui::Text("Status: %s", app->settings.voicegroupLoaded ? "Voicegroup loaded" : "Voicegroup not loaded");
 
@@ -414,6 +682,7 @@ static void render_general_tab(PlayerApp *app)
         app->settings.songMasterVolume = (uint8_t)songVolume;
         std::lock_guard<std::mutex> lock(app->mutex);
         apply_engine_settings(app);
+        save_config_file(app);
     }
 
     int reverb = (int)app->settings.reverbAmount;
@@ -421,6 +690,7 @@ static void render_general_tab(PlayerApp *app)
         app->settings.reverbAmount = (uint8_t)reverb;
         std::lock_guard<std::mutex> lock(app->mutex);
         apply_engine_settings(app);
+        save_config_file(app);
     }
 
     int polyphony = (int)app->settings.maxPcmChannels;
@@ -428,11 +698,13 @@ static void render_general_tab(PlayerApp *app)
         app->settings.maxPcmChannels = (uint8_t)polyphony;
         std::lock_guard<std::mutex> lock(app->mutex);
         apply_engine_settings(app);
+        save_config_file(app);
     }
 
     if (ImGui::Checkbox("GBA Analog Filter", &app->settings.analogFilter)) {
         std::lock_guard<std::mutex> lock(app->mutex);
         apply_engine_settings(app);
+        save_config_file(app);
     }
 }
 
@@ -680,6 +952,7 @@ static void glfw_error_callback(int error, const char *description)
 int main(int argc, char **argv)
 {
     PlayerApp app = {};
+    char startupMidiPath[512] = {0};
     app.selectedVoice = 0;
     app.settings.songMasterVolume = 127;
     app.settings.maxPcmChannels = 5;
@@ -687,6 +960,13 @@ int main(int argc, char **argv)
     app.tailSeconds = 3.0;
 
     const char *startupMidi = NULL;
+    resolve_config_path(app.configPath, sizeof(app.configPath), argc > 0 ? argv[0] : NULL);
+    if (!app.configPath[0])
+        snprintf(app.configPath, sizeof(app.configPath), "%s", "poryaaaa.cfg");
+    load_config_file(&app, app.configPath, startupMidiPath, sizeof(startupMidiPath));
+    if (startupMidiPath[0])
+        startupMidi = startupMidiPath;
+
     int argi = 1;
     if (argi + 1 < argc && argv[argi][0] != '-' && argv[argi + 1][0] != '-') {
         snprintf(app.settings.projectRoot, sizeof(app.settings.projectRoot), "%s", argv[argi++]);
@@ -696,6 +976,7 @@ int main(int argc, char **argv)
     for (; argi < argc; argi++) {
         if (strcmp(argv[argi], "--midi") == 0 && argi + 1 < argc) {
             startupMidi = argv[++argi];
+            snprintf(app.configMidiPath, sizeof(app.configMidiPath), "%s", startupMidi);
         } else if (strcmp(argv[argi], "--song-volume") == 0 && argi + 1 < argc) {
             int v = atoi(argv[++argi]);
             if (v < 0) v = 0;
@@ -731,6 +1012,9 @@ int main(int argc, char **argv)
     }
 
     sync_input_buffers(&app);
+    if (startupMidi)
+        snprintf(app.midiPathBuf, sizeof(app.midiPathBuf), "%s", startupMidi);
+    refresh_voicegroup_choices(&app, app.settings.projectRoot);
 
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) {
@@ -859,6 +1143,7 @@ int main(int argc, char **argv)
     if (app.loadedVg)
         voicegroup_free(app.loadedVg);
     midi_timeline_free(app.timeline);
+    voicegroup_name_list_free(app.voicegroupChoices);
     if (app.engineInitialized)
         m4a_engine_destroy(&app.engine);
 
