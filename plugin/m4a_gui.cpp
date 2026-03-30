@@ -607,10 +607,6 @@ void m4a_gui_destroy(M4AGuiState *gui)
     if (!gui)
         return;
 
-
-    /* Stop the internal render timer before tearing down GL/ImGui */
-    m4a_gui_stop_internal_timer(gui);
-
     ImGui::SetCurrentContext(gui->imguiCtx);
 
     /* puglFreeView() on Windows calls puglFreeViewInternals() which destroys
