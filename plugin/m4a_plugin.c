@@ -5,11 +5,13 @@
 
 #include <clap/clap.h>
 #include <clap/ext/gui.h>
+#include <clap/ext/params.h>
 #include <clap/ext/timer-support.h>
 #include <clap/ext/draft/undo.h>
 #include "m4a_plugin.h"
 #include "m4a_engine.h"
 #include "m4a_channel.h"
+#include "m4a_params.h"
 #include "m4a_reverb.h"
 #include "voicegroup_loader.h"
 #include "m4a_gui.h"
@@ -184,6 +186,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->activated = false;
     data->gui = NULL;
     data->guiTimerId = CLAP_INVALID_ID;
+    m4a_params_init(data);
     /* Load defaults from config file placed next to the .clap */
     load_config_file(data);
     /* Forward the log path into the voicegroup loader so it can emit diagnostics */
@@ -230,6 +233,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
         }
     }
 
+    m4a_params_apply_to_engine(data);
     data->activated = true;
 
     /* Update voice data pointers for the GUI */
@@ -310,7 +314,7 @@ static void process_midi_event(M4APluginData *data, const uint8_t *msg)
         m4a_engine_note_off(&data->engine, channel, msg[1]);
         break;
     case 0xC0: /* Program Change */
-        m4a_engine_program_change(&data->engine, channel, msg[1]);
+        m4a_params_process_midi_program_change(data, channel, msg[1]);
         break;
     case 0xB0: /* Control Change */
         m4a_engine_cc(&data->engine, channel, msg[1], msg[2]);
@@ -380,6 +384,9 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
                 case CLAP_EVENT_NOTE_OFF:
                 case CLAP_EVENT_NOTE_CHOKE:
                     process_clap_note_event(data, (const clap_event_note_t *)hdr);
+                    break;
+                case CLAP_EVENT_PARAM_VALUE:
+                    m4a_params_process_value_event(data, (const clap_event_param_value_t *)hdr);
                     break;
                 case CLAP_EVENT_MIDI:
                 {
@@ -479,6 +486,7 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     uint8_t analogFilterByte = data->analogFilter ? 1 : 0;
     if (stream->write(stream, &analogFilterByte, 1) != 1) return false;
     if (stream->write(stream, &data->maxPcmChannels, 1) != 1) return false;
+    if (!m4a_params_state_save(data, stream)) return false;
 
     return true;
 }
@@ -518,6 +526,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (maxChannelsByte < 1) maxChannelsByte = 1;
     if (maxChannelsByte > MAX_PCM_CHANNELS) maxChannelsByte = MAX_PCM_CHANNELS;
     data->maxPcmChannels = maxChannelsByte;
+    if (!m4a_params_state_load(data, stream)) return false;
 
     if (data->activated) {
         /* Only reload voicegroup if the project root or name actually changed */
@@ -541,6 +550,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         data->engine.analogFilter = data->analogFilter;
         data->engine.maxPcmChannels = data->maxPcmChannels;
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
+        m4a_params_apply_to_engine(data);
     }
 
     /* Push restored values into the GUI so it reflects the loaded state */
@@ -920,6 +930,7 @@ static const void *plugin_get_extension(const clap_plugin_t *plugin, const char 
 {
     if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0)   return &s_audio_ports;
     if (strcmp(id, CLAP_EXT_NOTE_PORTS) == 0)    return &s_note_ports;
+    if (strcmp(id, CLAP_EXT_PARAMS) == 0)        return m4a_params_extension();
     if (strcmp(id, CLAP_EXT_STATE) == 0)          return &s_state;
     if (strcmp(id, CLAP_EXT_GUI) == 0)            return &s_gui;
     if (strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0)  return &s_timer_support;

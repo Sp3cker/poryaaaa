@@ -5,8 +5,9 @@
 #include "voicegroup_loader.h"
 #include "m4a_gui.h"
 #include <clap/clap.h>
+#include <stdatomic.h>
 
-typedef struct {
+typedef struct M4APluginData {
     M4AEngine engine;
     LoadedVoiceGroup *loadedVg;
     VoicegroupLoaderConfig loaderConfig;
@@ -31,6 +32,15 @@ typedef struct {
     /* Set when the plugin calls request_restart (e.g. after Reload).
      * The standalone polls this to perform the actual restart cycle. */
     bool restartRequested;
+
+    /* Effective per-channel program exposed through the CLAP params extension. */
+    atomic_uchar effectivePrograms[MAX_TRACKS];
+
+    /* Last program requested via CLAP param automation/manual edits. */
+    atomic_uchar automatedPrograms[MAX_TRACKS];
+
+    /* When true, a MIDI Program Change is currently overriding automation. */
+    atomic_bool midiProgramOverride[MAX_TRACKS];
 } M4APluginData;
 
 #endif /* M4A_PLUGIN_H */
