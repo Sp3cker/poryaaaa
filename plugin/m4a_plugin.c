@@ -56,6 +56,52 @@ static char s_pluginDir[512] = {0};
 static const char *s_pluginLogPath = NULL;
 
 /*
+ * Recognise the canonical "filler" slot that pokeemerald voicegroups use
+ * to pad out unused program numbers:
+ *   voice_square_1 60, 0, 0, 2, 0, 0, 15, 0
+ * All other voice types (and other square_1 variants) are real content.
+ */
+static int voice_is_filler(const ToneData *v)
+{
+    if (v->type != VOICE_SQUARE_1) return 0;
+    if (v->key != 60) return 0;
+    if (v->panSweep != 0) return 0;                   /* sweep */
+    if ((uintptr_t)v->wavePointer != 2) return 0;     /* duty */
+    if (v->attack != 0) return 0;
+    if (v->decay != 0) return 0;
+    if (v->sustain != 15) return 0;
+    if (v->release != 0) return 0;
+    return 1;
+}
+
+/*
+ * Zero-filled slots (never touched by the parser — the voicegroup file
+ * had fewer than 128 entries, or a parse error left the slot at calloc
+ * defaults). Treat them as empty.
+ */
+static int voice_is_empty(const ToneData *v)
+{
+    return v->type == 0 && v->key == 0 && v->panSweep == 0 && v->length == 0
+        && v->wav == NULL && v->attack == 0 && v->decay == 0
+        && v->sustain == 0 && v->release == 0;
+}
+
+static const char *voice_type_label(uint8_t type)
+{
+    switch (type) {
+    case VOICE_SQUARE_1:
+    case VOICE_SQUARE_1_ALT: return "Square 1";
+    case VOICE_SQUARE_2:
+    case VOICE_SQUARE_2_ALT: return "Square 2";
+    case VOICE_NOISE:
+    case VOICE_NOISE_ALT:    return "Noise";
+    case VOICE_KEYSPLIT:     return "Keysplit";
+    case VOICE_KEYSPLIT_ALL: return "Drumset";
+    default:                 return NULL;
+    }
+}
+
+/*
  * Write poryaaaa_state.json next to the .clap bundle so sibling plugins
  * (ccomidi) can mirror the currently-loaded voicegroup. Uses write-then-rename
  * so readers never observe a partial file.
@@ -86,12 +132,34 @@ static void write_state_file(const M4APluginData *data)
     fprintf(f, "  \"slots\": [\n");
     int first = 1;
     for (int i = 0; i < VOICEGROUP_SIZE; i++) {
-        const char *name = data->loadedVg->voiceSampleNames[i];
-        if (name[0] == '\0') continue;
+        const ToneData *v = &data->loadedVg->voices[i];
+        if (voice_is_empty(v)) continue;
+        if (voice_is_filler(v)) continue;
+
+        const char *sampleName = data->loadedVg->voiceSampleNames[i];
+        const char *typeLabel = voice_type_label(v->type);
+        /* Sample-bearing voices use the per-slot basename; the CGB voice
+         * types and keysplits fall back to a type label. */
+        const char *display = sampleName[0] ? sampleName
+                            : typeLabel    ? typeLabel
+                            : NULL;
+        if (!display) continue;
+
         if (!first) fprintf(f, ",\n");
         first = 0;
         fprintf(f, "    {\"program\": %d, \"name\": \"", i);
-        for (const char *p = name; *p; p++) {
+        for (const char *p = display; *p; p++) {
+            if (*p == '"' || *p == '\\') fputc('\\', f);
+            fputc(*p, f);
+        }
+        fprintf(f, "\"}");
+    }
+    fprintf(f, "\n  ],\n");
+    fprintf(f, "  \"availableInstruments\": [\n");
+    for (int i = 0; i < data->availableInstruments.count; i++) {
+        if (i > 0) fprintf(f, ",\n");
+        fprintf(f, "    {\"name\": \"");
+        for (const char *p = data->availableInstruments.entries[i].name; *p; p++) {
             if (*p == '"' || *p == '\\') fputc('\\', f);
             fputc(*p, f);
         }
@@ -235,6 +303,9 @@ static bool plugin_init(const clap_plugin_t *plugin)
     atomic_init(&data->latestXcmdSeq, 0);
     atomic_init(&data->latestXcmdMeta, 0);
     atomic_init(&data->latestXcmdValue, 0);
+    atomic_init(&data->pendingAddIndexLsb, 0);
+    atomic_init(&data->pendingAddIndex, 0);
+    atomic_init(&data->pendingAddSeq, 0);
     data->guiMidiActivitySeqSeen = 0;
     data->guiXcmdActivitySeqSeen = 0;
     data->guiPendingXcmdSeqSeen = 0;
@@ -265,6 +336,7 @@ static void plugin_destroy(const clap_plugin_t *plugin)
     }
     project_asset_index_destroy(data->assetIndex);
     data->assetIndex = NULL;
+    vg_available_free(&data->availableInstruments);
     m4a_engine_destroy(&data->engine);
     free(data);
     free((void *)plugin);
@@ -304,6 +376,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
             /* Apply any pending sample overrides */
             if (data->assetIndex)
                 project_asset_index_apply_overrides(data->assetIndex, data->projectRoot, data->loadedVg);
+            vg_available_build(data->projectRoot, &data->loaderConfig, &data->availableInstruments);
             m4a_params_sync_to_engine(data);
             write_state_file(data);
         }
@@ -413,6 +486,25 @@ static void process_midi_event(M4APluginData *data, const uint8_t *msg)
 
             atomic_store_explicit(&data->pendingXcmdMeta, meta, memory_order_relaxed);
             atomic_fetch_add_explicit(&data->pendingXcmdSeq, 1, memory_order_release);
+        }
+        if (msg[1] == 98) {
+            /* CC#98: low 7 bits of the "append-instrument" index. ccomidi
+             * always sends this immediately before CC#99, so the latest
+             * stored LSB is the one that pairs with the next trigger. */
+            atomic_store_explicit(&data->pendingAddIndexLsb,
+                                  (unsigned int)msg[2], memory_order_relaxed);
+            break;
+        }
+        if (msg[1] == 99) {
+            /* CC#99: high 7 bits + trigger. Compose the 14-bit index (0..16383)
+             * using the LSB most recently set by CC#98, then defer the file
+             * append + reload to the GUI thread. */
+            unsigned int lsb = atomic_load_explicit(&data->pendingAddIndexLsb,
+                                                    memory_order_relaxed);
+            unsigned int idx = (((unsigned int)msg[2] & 0x7Fu) << 7) | (lsb & 0x7Fu);
+            atomic_store_explicit(&data->pendingAddIndex, idx, memory_order_relaxed);
+            atomic_fetch_add_explicit(&data->pendingAddSeq, 1, memory_order_release);
+            break;
         }
         m4a_engine_cc(&data->engine, channel, msg[1], msg[2]);
         break;
@@ -718,6 +810,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
                 m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
                 memcpy(data->originalVoices, data->loadedVg->voices, sizeof(data->originalVoices));
                 memset(data->voiceOverrides, 0, sizeof(data->voiceOverrides));
+                vg_available_build(data->projectRoot, &data->loaderConfig, &data->availableInstruments);
                 write_state_file(data);
             }
         }
@@ -851,6 +944,29 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
                 project_asset_index_set_override(data->assetIndex, swapVoice, swapKind, swapFileName);
                 data->restartRequested = true;
                 data->host->request_restart(data->host);
+            }
+        }
+    }
+
+    /* Handle external add-instrument requests received as CC#99 on the audio
+     * thread. The CC value is an index into availableInstruments; the audio
+     * thread only bumps a seq counter — the file append and reload happen here. */
+    {
+        unsigned int addSeq = atomic_load_explicit(&data->pendingAddSeq, memory_order_acquire);
+        if (addSeq != data->guiPendingAddSeqSeen) {
+            data->guiPendingAddSeqSeen = addSeq;
+            unsigned int idx = atomic_load_explicit(&data->pendingAddIndex, memory_order_relaxed);
+            if (data->loadedVg
+                && data->loadedVg->sourceFile[0]
+                && idx < (unsigned int)data->availableInstruments.count) {
+                const AvailableInstrument *ai = &data->availableInstruments.entries[idx];
+                FILE *vf = fopen(data->loadedVg->sourceFile, "a");
+                if (vf) {
+                    fprintf(vf, "%s\n", ai->macro);
+                    fclose(vf);
+                    data->restartRequested = true;
+                    data->host->request_restart(data->host);
+                }
             }
         }
     }

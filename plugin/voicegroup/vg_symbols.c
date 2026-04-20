@@ -65,6 +65,14 @@ static void parse_symbol_inc_file(const char *filePath, SymbolMap *map)
         vg_rtrim(line);
         char *trimmed = vg_ltrim(line);
 
+        /* Pokeemerald gates per-species cries behind `.if P_CRIES_ENABLED
+         * == TRUE`. Everything past that line is cry data — not useful as a
+         * musical sample. Stop parsing the file so the cries never enter
+         * the symbol map. Benign for files that don't use this gate. */
+        if (strncmp(trimmed, ".if", 3) == 0
+            && strstr(trimmed, "P_CRIES_ENABLED"))
+            break;
+
         char *colonColon = strstr(trimmed, "::");
         if (colonColon && colonColon > trimmed) {
             *colonColon = '\0';

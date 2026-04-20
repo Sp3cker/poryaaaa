@@ -53,6 +53,11 @@ typedef struct {
     uint8_t **keySplitTables;
     int keySplitTableCount;
     int keySplitTableCapacity;
+
+    /* Absolute path of the .inc/.s file that defines this voicegroup.
+     * For emerald-style per-file layouts this is the file to append to
+     * when adding an instrument. Empty for monolithic layouts. */
+    char sourceFile[VG_MAX_PATH_LEN];
 } LoadedVoiceGroup;
 
 /*

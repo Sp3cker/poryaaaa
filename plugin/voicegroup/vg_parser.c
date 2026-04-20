@@ -726,6 +726,13 @@ int vg_parse_voicegroup(const char *projectRoot,
     }
     vg_log("vg_parse_voicegroup: found at '%s' label='%s'", loc.filePath, loc.label);
 
+    /* Retain the source file path (only meaningful for emerald-style
+     * per-file layouts — monolithic matches set loc.label). */
+    if (!loc.label[0]) {
+        strncpy(vg->sourceFile, loc.filePath, VG_MAX_PATH_LEN - 1);
+        vg->sourceFile[VG_MAX_PATH_LEN - 1] = '\0';
+    }
+
     WaveCache waveCache;
     vg_wave_cache_init(&waveCache);
 
