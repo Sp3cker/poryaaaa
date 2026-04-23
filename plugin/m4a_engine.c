@@ -45,6 +45,44 @@ static inline uint32_t cgb_apply_fixed_freq(uint8_t cgbType, uint32_t freq)
     return freq;
 }
 
+/* Emulate CGB channel 1's NR10 frequency sweep. Runs at 128 Hz — the rate
+ * of the hardware sweep clock. The sweep byte packs:
+ *   bits 6-4 = period (0 disables sweep)
+ *   bit  3   = direction (0 = increase, 1 = decrease)
+ *   bits 2-0 = shift amount
+ * Each tick, the counter decrements; on reaching zero we compute
+ *   new = old ± (old >> shift)
+ * and either update the frequency or, on overflow, cut the channel off
+ * (matches hardware: overflow disables the DAC). An underflow from
+ * downward sweep clamps at 0 rather than wrapping. */
+static void cgb_sweep_tick(M4ACGBChannel *ch)
+{
+    if (ch->status == 0) return;
+    uint8_t period = (ch->sweep >> 4) & 0x07;
+    if (period == 0) return;
+
+    if (ch->sweepCounter > 1) {
+        ch->sweepCounter--;
+        return;
+    }
+    ch->sweepCounter = period;
+
+    uint8_t shift = ch->sweep & 0x07;
+    if (shift == 0) return;
+
+    uint32_t freq = ch->frequency;
+    uint32_t delta = freq >> shift;
+    if (ch->sweep & 0x08) {
+        ch->frequency = (delta > freq) ? 0 : (freq - delta);
+    } else {
+        uint32_t newFreq = freq + delta;
+        if (newFreq > 0x7FF)
+            m4a_cgb_channel_stop(ch);
+        else
+            ch->frequency = newFreq;
+    }
+}
+
 uint32_t m4a_midi_key_to_cgb_freq(uint8_t chanNum, uint8_t key, uint8_t fineAdjust)
 {
     if (chanNum == 4) {
@@ -215,6 +253,9 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->tempoU = 0x100;
     engine->tempoI = 150;
     engine->tempoC = 0;
+
+    engine->samplesPerSweepTick = sampleRate / 128.0f;
+    engine->sweepTickAccum = 0.0f;
 
     /* Initialize tracks with defaults */
     for (int i = 0; i < MAX_TRACKS; i++) {
@@ -515,8 +556,12 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
 
         if (voiceType == 1 || voiceType == 2) {
             ch->dutyCycle = (uint8_t)(uintptr_t)voice->wavePointer & 0x03;
-            if (voiceType == 1)
+            if (voiceType == 1) {
                 ch->sweep = (voice->panSweep & 0x70) ? voice->panSweep : 0x08;
+                /* Prime the 128 Hz sweep counter with the period from NR10.
+                 * First step fires after `period` sweep ticks (1/128 s each). */
+                ch->sweepCounter = (ch->sweep >> 4) & 0x07;
+            }
         } else if (voiceType == 3) {
             ch->wavePointer = voice->wavePointer;
         }
@@ -971,6 +1016,13 @@ void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamp
         if (engine->tickAccumulator >= engine->samplesPerTick) {
             engine->tickAccumulator -= engine->samplesPerTick;
             m4a_engine_tick(engine);
+        }
+
+        /* CGB ch1 NR10 sweep clock (128 Hz). Only ch1 has a sweep unit. */
+        engine->sweepTickAccum += 1.0f;
+        if (engine->sweepTickAccum >= engine->samplesPerSweepTick) {
+            engine->sweepTickAccum -= engine->samplesPerSweepTick;
+            cgb_sweep_tick(&engine->cgbChannels[0]);
         }
 
         /* Mix all active channels */

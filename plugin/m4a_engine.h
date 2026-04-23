@@ -172,6 +172,7 @@ typedef struct {
     uint8_t sustainGoal;
     uint8_t length;
     uint8_t sweep;
+    uint8_t sweepCounter;   /* CGB ch1: ticks remaining until next NR10 sweep step */
     uint8_t dutyCycle;
     uint8_t pan;
     uint8_t panMask;
@@ -214,6 +215,12 @@ struct M4AEngine {
     float sampleRate;
     float samplesPerTick;
     float tickAccumulator;
+
+    /* CGB channel 1 sweep runs off a 128 Hz clock (hardware NR10 timing).
+     * samplesPerSweepTick = sampleRate / 128; sweepTickAccum accumulates
+     * per output sample and fires cgb_sweep_tick(ch1) on rollover. */
+    float samplesPerSweepTick;
+    float sweepTickAccum;
 
     uint8_t masterVolume;   /* 0-15 */
     uint8_t songMasterVolume; /* 0-127 */
