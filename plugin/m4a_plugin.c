@@ -102,7 +102,7 @@ static const char *voice_type_label(uint8_t type)
 }
 
 /*
- * Write poryaaaa_state.json next to the .clap bundle so sibling plugins
+ * Write poryaaaa_state.json next to the .vst3 bundle so sibling plugins
  * (ccomidi) can mirror the currently-loaded voicegroup. Uses write-then-rename
  * so readers never observe a partial file.
  *
@@ -149,17 +149,6 @@ static void write_state_file(const M4APluginData *data)
         first = 0;
         fprintf(f, "    {\"program\": %d, \"name\": \"", i);
         for (const char *p = display; *p; p++) {
-            if (*p == '"' || *p == '\\') fputc('\\', f);
-            fputc(*p, f);
-        }
-        fprintf(f, "\"}");
-    }
-    fprintf(f, "\n  ],\n");
-    fprintf(f, "  \"availableInstruments\": [\n");
-    for (int i = 0; i < data->availableInstruments.count; i++) {
-        if (i > 0) fprintf(f, ",\n");
-        fprintf(f, "    {\"name\": \"");
-        for (const char *p = data->availableInstruments.entries[i].name; *p; p++) {
             if (*p == '"' || *p == '\\') fputc('\\', f);
             fputc(*p, f);
         }
@@ -303,9 +292,6 @@ static bool plugin_init(const clap_plugin_t *plugin)
     atomic_init(&data->latestXcmdSeq, 0);
     atomic_init(&data->latestXcmdMeta, 0);
     atomic_init(&data->latestXcmdValue, 0);
-    atomic_init(&data->pendingAddIndexLsb, 0);
-    atomic_init(&data->pendingAddIndex, 0);
-    atomic_init(&data->pendingAddSeq, 0);
     data->guiMidiActivitySeqSeen = 0;
     data->guiXcmdActivitySeqSeen = 0;
     data->guiPendingXcmdSeqSeen = 0;
@@ -336,7 +322,6 @@ static void plugin_destroy(const clap_plugin_t *plugin)
     }
     project_asset_index_destroy(data->assetIndex);
     data->assetIndex = NULL;
-    vg_available_free(&data->availableInstruments);
     m4a_engine_destroy(&data->engine);
     free(data);
     free((void *)plugin);
@@ -376,7 +361,6 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
             /* Apply any pending sample overrides */
             if (data->assetIndex)
                 project_asset_index_apply_overrides(data->assetIndex, data->projectRoot, data->loadedVg);
-            vg_available_build(data->projectRoot, &data->loaderConfig, &data->availableInstruments);
             m4a_params_sync_to_engine(data);
             write_state_file(data);
         }
@@ -486,25 +470,6 @@ static void process_midi_event(M4APluginData *data, const uint8_t *msg)
 
             atomic_store_explicit(&data->pendingXcmdMeta, meta, memory_order_relaxed);
             atomic_fetch_add_explicit(&data->pendingXcmdSeq, 1, memory_order_release);
-        }
-        if (msg[1] == 98) {
-            /* CC#98: low 7 bits of the "append-instrument" index. ccomidi
-             * always sends this immediately before CC#99, so the latest
-             * stored LSB is the one that pairs with the next trigger. */
-            atomic_store_explicit(&data->pendingAddIndexLsb,
-                                  (unsigned int)msg[2], memory_order_relaxed);
-            break;
-        }
-        if (msg[1] == 99) {
-            /* CC#99: high 7 bits + trigger. Compose the 14-bit index (0..16383)
-             * using the LSB most recently set by CC#98, then defer the file
-             * append + reload to the GUI thread. */
-            unsigned int lsb = atomic_load_explicit(&data->pendingAddIndexLsb,
-                                                    memory_order_relaxed);
-            unsigned int idx = (((unsigned int)msg[2] & 0x7Fu) << 7) | (lsb & 0x7Fu);
-            atomic_store_explicit(&data->pendingAddIndex, idx, memory_order_relaxed);
-            atomic_fetch_add_explicit(&data->pendingAddSeq, 1, memory_order_release);
-            break;
         }
         m4a_engine_cc(&data->engine, channel, msg[1], msg[2]);
         break;
@@ -810,7 +775,6 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
                 m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
                 memcpy(data->originalVoices, data->loadedVg->voices, sizeof(data->originalVoices));
                 memset(data->voiceOverrides, 0, sizeof(data->voiceOverrides));
-                vg_available_build(data->projectRoot, &data->loaderConfig, &data->availableInstruments);
                 write_state_file(data);
             }
         }
@@ -944,29 +908,6 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
                 project_asset_index_set_override(data->assetIndex, swapVoice, swapKind, swapFileName);
                 data->restartRequested = true;
                 data->host->request_restart(data->host);
-            }
-        }
-    }
-
-    /* Handle external add-instrument requests received as CC#99 on the audio
-     * thread. The CC value is an index into availableInstruments; the audio
-     * thread only bumps a seq counter — the file append and reload happen here. */
-    {
-        unsigned int addSeq = atomic_load_explicit(&data->pendingAddSeq, memory_order_acquire);
-        if (addSeq != data->guiPendingAddSeqSeen) {
-            data->guiPendingAddSeqSeen = addSeq;
-            unsigned int idx = atomic_load_explicit(&data->pendingAddIndex, memory_order_relaxed);
-            if (data->loadedVg
-                && data->loadedVg->sourceFile[0]
-                && idx < (unsigned int)data->availableInstruments.count) {
-                const AvailableInstrument *ai = &data->availableInstruments.entries[idx];
-                FILE *vf = fopen(data->loadedVg->sourceFile, "a");
-                if (vf) {
-                    fprintf(vf, "%s\n", ai->macro);
-                    fclose(vf);
-                    data->restartRequested = true;
-                    data->host->request_restart(data->host);
-                }
             }
         }
     }

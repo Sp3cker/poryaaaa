@@ -8,8 +8,32 @@ set(CMAKE_CXX_STANDARD 17)
 set(CLAP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(clap-sdk)
 
-# ---- clap-wrapper (standalone support) ----
+# ---- clap-wrapper (VST3 + standalone support) ----
+# Apply vendored clap-wrapper patches idempotently. The patch adds a
+# VST3 kLegacyMIDICCOutEvent -> CLAP_EVENT_MIDI input-side translation
+# that upstream clap-wrapper does not yet ship; see patches/README.
+# Marker `kLegacyMIDICCOutEvent` appears only after the patch is applied.
+set(_poryaaaa_wrapper_proc
+    "${CMAKE_CURRENT_SOURCE_DIR}/clap-wrapper/src/detail/vst3/process.cpp")
+if(EXISTS "${_poryaaaa_wrapper_proc}")
+    file(READ "${_poryaaaa_wrapper_proc}" _poryaaaa_wrapper_content)
+    if(NOT _poryaaaa_wrapper_content MATCHES "kLegacyMIDICCOutEvent")
+        execute_process(
+            COMMAND git apply --verbose
+                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/clap-wrapper-midi-event-bridge.patch"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/clap-wrapper"
+            RESULT_VARIABLE _poryaaaa_patch_result
+            ERROR_VARIABLE  _poryaaaa_patch_err)
+        if(NOT _poryaaaa_patch_result EQUAL 0)
+            message(FATAL_ERROR
+                "Failed to apply clap-wrapper patch: ${_poryaaaa_patch_err}")
+        endif()
+        message(STATUS "poryaaaa: applied clap-wrapper MIDI-event-bridge patch")
+    endif()
+endif()
+
 set(CLAP_WRAPPER_DOWNLOAD_DEPENDENCIES TRUE CACHE BOOL "" FORCE)
+set(CLAP_WRAPPER_COPY_AFTER_BUILD TRUE CACHE BOOL "" FORCE)
 add_subdirectory(clap-wrapper)
 # clap-wrapper enables -Werror but its own fsutil.cpp triggers -Wreturn-type
 # with MinGW cross-compilation, so relax that specific warning.
@@ -110,8 +134,6 @@ endif()
 
 # Use C++ linker (required because we mix C and C++ sources)
 set_target_properties(poryaaaa PROPERTIES
-    PREFIX ""
-    SUFFIX ".clap"
     LINKER_LANGUAGE CXX
 )
 
@@ -133,19 +155,12 @@ endif()
 # Platform-specific settings
 if(WIN32)
     target_link_libraries(poryaaaa PRIVATE dwmapi -static-libgcc -static-libstdc++)
-elseif(APPLE)
-    set_target_properties(poryaaaa PROPERTIES
-        BUNDLE TRUE
-        BUNDLE_EXTENSION "clap"
-    )
-    # MACOSX_BUNDLE_INFO_PLIST only works for MACOSX_BUNDLE (app bundles).
-    # For a generic BUNDLE (.clap), copy Info.plist manually.
-    add_custom_command(TARGET poryaaaa POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/Info.plist"
-            "$<TARGET_BUNDLE_CONTENT_DIR:poryaaaa>/Info.plist"
-    )
 endif()
+
+target_add_vst3_wrapper(
+    TARGET poryaaaa
+    OUTPUT_NAME "poryaaaa"
+)
 
 # ---- Standalone Test (WAV export) ----
 add_executable(poryaaaa_test

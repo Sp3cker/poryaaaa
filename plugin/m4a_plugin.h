@@ -4,7 +4,6 @@
 #include <stdatomic.h>
 #include "m4a_engine.h"
 #include "voicegroup/voicegroup_loader.h"
-#include "voicegroup/vg_available.h"
 #include "voicegroup/project_asset_index.h"
 #include "m4a_gui.h"
 #include <clap/clap.h>
@@ -30,16 +29,6 @@ typedef struct {
     atomic_uint latestXcmdSeq;
     atomic_uint latestXcmdMeta;
     atomic_uint latestXcmdValue;
-    /* "Add instrument" control channel. ccomidi sends a CC#98 (index LSB)
-     * immediately followed by a CC#99 (index MSB + trigger) every time the
-     * user picks an instrument. pendingAddIndexLsb holds the last LSB
-     * received; on CC#99 the audio thread composes the full 14-bit index
-     * into pendingAddIndex and bumps pendingAddSeq. The GUI thread observes
-     * the seq change, appends availableInstruments[index].macro to the
-     * voicegroup file, and triggers a reload. */
-    atomic_uint pendingAddIndexLsb;
-    atomic_uint pendingAddIndex;
-    atomic_uint pendingAddSeq;
     /* CLAP param mirror for per-track program selection.
      * Kept outside the engine so params/state can read it without poking
      * directly at audio-thread-owned track state. */
@@ -52,12 +41,6 @@ typedef struct {
     /* Project-wide sample catalog and per-voice sample overrides */
     ProjectAssetIndex *assetIndex;
 
-    /* Project-wide "available to append" instrument list. Rebuilt whenever
-     * the voicegroup is (re)loaded. ccomidi picks a display name from
-     * state.json; on CC#99 the plugin appends availableInstruments[index].macro
-     * to data->loadedVg->sourceFile. */
-    AvailableInstrumentList availableInstruments;
-
     /* GUI */
     const clap_host_t *host;
     M4AGuiState *gui;
@@ -66,7 +49,6 @@ typedef struct {
     unsigned int guiXcmdActivitySeqSeen;
     unsigned int guiPendingXcmdSeqSeen;
     unsigned int guiLatestXcmdSeqSeen;
-    unsigned int guiPendingAddSeqSeen;
 
     /* Set when the plugin calls request_restart (e.g. after Reload).
      * The standalone polls this to perform the actual restart cycle. */
