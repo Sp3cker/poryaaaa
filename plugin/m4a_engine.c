@@ -31,6 +31,20 @@ uint32_t m4a_midi_key_to_freq(WaveData *wav, uint8_t key, uint8_t fineAdjust)
 /*
  * MidiKeyToCgbFreq - matches m4a.c
  */
+
+/* Emerald's SOUNDBIAS_H default (0x40) puts the DAC in the 65536 Hz PWM-rate
+ * branch of CgbSound (m4a.c:1185), which rounds the 11-bit frequency register
+ * to `(freq + 1) & 0x7fe` on the pitched CGB channels (tone1, tone2, wave).
+ * The fix flag is carried by all `_alt` CGB voice variants — square_1_alt,
+ * square_2_alt, programmable_wave_alt, noise_alt — but hardware excludes
+ * noise (ch 4) from the adjustment, so we do too. */
+static inline uint32_t cgb_apply_fixed_freq(uint8_t cgbType, uint32_t freq)
+{
+    if (cgbType >= 1 && cgbType <= 3)
+        return (freq + 1) & 0x7fe;
+    return freq;
+}
+
 uint32_t m4a_midi_key_to_cgb_freq(uint8_t chanNum, uint8_t key, uint8_t fineAdjust)
 {
     if (chanNum == 4) {
@@ -494,6 +508,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->pseudoEchoLength = track->pseudoEchoLength;
         ch->length = voice->length;
         ch->gateTime = 0;
+        ch->fixedFreq = (voice->type & VOICE_TYPE_FIX) != 0;
 
         cgb_chn_vol_set(ch, track);
         m4a_cgb_mod_vol(ch);
@@ -508,6 +523,8 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
 
         /* Calculate frequency */
         ch->frequency = m4a_midi_key_to_cgb_freq(voiceType, (uint8_t)finalKey, track->pitM);
+        if (ch->fixedFreq)
+            ch->frequency = cgb_apply_fixed_freq(voiceType, ch->frequency);
         /* Noise channel: apply period bit (NR43 bit 3) from wavePointer.
          * period=0 → 15-bit LFSR, period=1 → 7-bit short-period LFSR. */
         if (voiceType == 4)
@@ -626,6 +643,8 @@ static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trac
             int32_t finalKey = (int32_t)ch->key + track->keyM;
             if (finalKey < 0) finalKey = 0;
             uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)finalKey, track->pitM);
+            if (ch->fixedFreq)
+                newFreq = cgb_apply_fixed_freq(ch->type, newFreq);
             /* Preserve NR43 bit 3 (7-bit LFSR mode) for noise channel.
              * gNoiseTable entries always have bit 3 = 0; the period bit is
              * ORed in at note-on time and must survive frequency updates. */
@@ -879,6 +898,8 @@ static void m4a_lfo_tick(M4AEngine *engine)
                         int32_t finalKey = (int32_t)ch->key + track->keyM;
                         if (finalKey < 0) finalKey = 0;
                         uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)finalKey, track->pitM);
+                        if (ch->fixedFreq)
+                            newFreq = cgb_apply_fixed_freq(ch->type, newFreq);
                         if (ch->type == 4)
                             newFreq |= ch->frequency & 0x08;
                         ch->frequency = newFreq;

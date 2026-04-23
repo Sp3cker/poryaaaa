@@ -183,6 +183,14 @@ typedef struct {
 
     uint16_t lfsr;          /* noise LFSR state */
 
+    /* Set when the voice's TONEDATA_TYPE_FIX bit is on — i.e. the _alt
+     * CGB voice variants square_1_alt (0x09), square_2_alt (0x0A),
+     * programmable_wave_alt (0x0B), noise_alt (0x0C). On pitched channels
+     * (1-3) the engine aligns the frequency register to the DAC PWM
+     * period (see cgb_apply_fixed_freq in m4a_engine.c). Noise (ch 4)
+     * carries the flag but is not PWM-corrected by hardware. */
+    bool fixedFreq;
+
     int trackIndex;
 
     /* Wave channel (type 3) declick: avoids a pop when the note ends by
