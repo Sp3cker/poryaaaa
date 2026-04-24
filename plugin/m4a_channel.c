@@ -566,14 +566,6 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
         sample = (sample * ch->envelopeVolume) >> 4;
     }
 
-    /* Scale CGB to match the GBA hardware mixing ratio.
-     * SOUNDCNT_H is initialised with SOUND_ALL_MIX_FULL (volume bits = 2), so
-     * mGBA applies psgShift = 4 - 2 = 2 (CGB >> 2) while PCM is << 2.
-     * That is a 16:1 ratio; >> 2 here keeps us in the same integer domain as
-     * the PCM mixer which already incorporates the << 2 implicitly through its
-     * larger sample values (~±127 vs CGB's ~±60). */
-    sample >>= 1;
-
     /* Track last sample for wave channel declick on note-off. */
     if (cgbType == 3)
         ch->declickSample = sample;

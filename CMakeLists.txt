@@ -75,6 +75,19 @@ set(ENGINE_SOURCES
     plugin/voicegroup_loader.c
 )
 
+# Full plugin source list, shared between the CLAP, VST3, and standalone
+# targets. Every plugin-format target rebuilds from source because clap-wrapper
+# adds format-specific export entries to the same translation unit set.
+set(PORYAAAA_PLUGIN_SOURCES
+    plugin/m4a_plugin.c
+    plugin/m4a_params.c
+    plugin/project_asset_index.c
+    plugin/m4a_gui.cpp
+    ${ENGINE_SOURCES}
+    ${IMGUI_SOURCES}
+    ${PUGL_SOURCES}
+)
+
 # ---- CLAP Plugin ----
 add_library(poryaaaa MODULE
     plugin/m4a_plugin.c
@@ -134,10 +147,16 @@ elseif(APPLE)
     )
     # MACOSX_BUNDLE_INFO_PLIST only works for MACOSX_BUNDLE (app bundles).
     # For a generic BUNDLE (.clap), copy Info.plist manually.
+    #
+    # Ad-hoc sign the full bundle (not just the Mach-O). Without this,
+    # hardened-runtime plugin scanners (Ableton's PluginScanner in particular)
+    # refuse the bundle with "code has no resources but signature indicates
+    # they must be present" and report the plugin as "not a plugin".
     add_custom_command(TARGET poryaaaa POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/Info.plist"
             "$<TARGET_BUNDLE_CONTENT_DIR:poryaaaa>/Info.plist"
+        COMMAND codesign -f -s - "$<TARGET_BUNDLE_DIR:poryaaaa>"
     )
 endif()
 
@@ -266,4 +285,66 @@ if(UNIX AND NOT APPLE)
             set_target_properties(${_salib} PROPERTIES ${_prop} "${_defs}")
         endif()
     endforeach()
+endif()
+
+# ---- VST3 (clap-wrapper) ----
+# Re-bundle the same plugin sources under a separate MODULE target so the
+# clap-wrapper VST3 entry point can coexist with the CLAP entry. The wrapper
+# calls into our plugin through the `clap_entry` symbol provided by
+# m4a_plugin.c, so this target has everything it needs in-tree without a
+# separate static lib.
+add_library(poryaaaa-vst3 MODULE
+    ${PORYAAAA_PLUGIN_SOURCES}
+)
+
+target_include_directories(poryaaaa-vst3 PRIVATE
+    plugin
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+    ${PUGL_DIR}/include
+    ${PUGL_DIR}/src
+)
+
+target_compile_definitions(poryaaaa-vst3 PRIVATE PUGL_STATIC)
+
+set_target_properties(poryaaaa-vst3 PROPERTIES
+    LINKER_LANGUAGE CXX
+)
+
+target_link_libraries(poryaaaa-vst3 PRIVATE clap)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(poryaaaa-vst3 PRIVATE m X11 Xcursor Xrandr Xext)
+endif()
+
+if(APPLE)
+    target_link_libraries(poryaaaa-vst3 PRIVATE "-framework Metal" "-framework QuartzCore" "-framework Cocoa")
+elseif(WIN32)
+    target_link_libraries(poryaaaa-vst3 PRIVATE opengl32 dwmapi -static-libgcc -static-libstdc++)
+else()
+    target_link_libraries(poryaaaa-vst3 PRIVATE GL)
+endif()
+
+target_add_vst3_wrapper(
+    TARGET poryaaaa-vst3
+    OUTPUT_NAME "poryaaaa"
+    BUNDLE_IDENTIFIER "com.huderlem.poryaaaa.vst3"
+    BUNDLE_VERSION "1.0"
+)
+
+# Install the built VST3 into the user's plugin folder so DAWs pick it up
+# without a separate copy step. Mirrors the CLAP install for `poryaaaa`.
+# The `codesign -f -s -` seals the bundle as ad-hoc; without it, hardened-
+# runtime scanners (Ableton) reject the bundle as "not a plugin".
+if(APPLE)
+    set(VST3_INSTALL_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/VST3")
+    add_custom_command(TARGET poryaaaa-vst3 POST_BUILD
+        COMMAND codesign -f -s - "$<TARGET_BUNDLE_DIR:poryaaaa-vst3>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${VST3_INSTALL_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
+            "${VST3_INSTALL_DIR}/poryaaaa.vst3"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "$<TARGET_BUNDLE_DIR:poryaaaa-vst3>"
+            "${VST3_INSTALL_DIR}/poryaaaa.vst3"
+    )
 endif()
