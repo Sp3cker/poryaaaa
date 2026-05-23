@@ -576,10 +576,9 @@ static void render_recorder_tab(M4AGuiState *gui)
         gui->recorderStatus[0] = '\0';
     }
 
-    /* Status counters */
+    /* Status counter */
     uint64_t evCount = m4a_engine_recorder_event_count(&data->engine);
-    double durSec    = m4a_engine_recorder_duration_seconds(&data->engine);
-    ImGui::Text("Buffered: %llu events (%.2fs)", (unsigned long long)evCount, durSec);
+    ImGui::Text("Buffered: %llu events", (unsigned long long)evCount);
 
     /* Filename input */
     ImGui::InputText("Filename", data->recorderPath, sizeof(data->recorderPath));

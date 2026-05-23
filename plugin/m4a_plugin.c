@@ -429,7 +429,8 @@ static void process_midi_clock_pulse(M4APluginData *data, uint32_t sample_in_blo
         data->extClockBpm = data->extClockBpm * 0.85 + instBpm * 0.15;
 
     m4a_engine_set_tempo_bpm(&data->engine, data->extClockBpm);
-    m4a_engine_recorder_set_tempo(&data->engine, sample_in_block, data->extClockBpm);
+    if (atomic_load(&data->recorderArmed))
+        m4a_engine_recorder_set_tempo(&data->engine, sample_in_block, data->extClockBpm);
 #if defined(M4A_DRIVER_V2)
     m4a_set_tempo_bpm(data->m4a_v2, data->extClockBpm);
 #endif
@@ -445,7 +446,8 @@ static void process_midi_system_event(M4APluginData *data, const uint8_t *msg,
         if (data->extClockBpm <= 0.0) break;  /* need a tempo before we can seek */
         uint32_t sixteenths = (uint32_t)msg[1] | ((uint32_t)msg[2] << 7);
         double posSec = ((double)sixteenths * 60.0) / (data->extClockBpm * 4.0);
-        m4a_engine_recorder_update_loop(&data->engine, false, 0.0, 0.0, posSec);
+        if (atomic_load(&data->recorderArmed))
+            m4a_engine_recorder_update_loop(&data->engine, false, 0.0, 0.0, posSec);
         break;
     }
     case 0xF8:  /* MIDI Clock (24 PPQ) */
@@ -540,14 +542,9 @@ static void process_midi_event(M4APluginData *data, const uint8_t *msg,
     }
     }
 
-    /* Record MIDI to the embedded recorder when armed. The recorder's
-     * samplePosition advances every block regardless of armed (tape-recorder
-     * model: time keeps flowing, the toggle only decides whether the current
-     * moment gets stamped into the buffer), so the displayed duration always
-     * reflects elapsed session time, and disarmed periods leave wall-time
-     * gaps in the SMF. samplePosition is monotonic so no reorder is possible.
-     * While capturing, latch the recorder-tab per-channel PC/Vol/Pan
-     * indicators so the GUI can show what's been captured. */
+    /* Record MIDI to the embedded recorder when armed. While capturing, latch
+     * the recorder-tab per-channel PC/Vol/Pan indicators so the GUI can show
+     * what's been captured. */
     if (atomic_load(&data->recorderArmed)) {
         m4a_engine_recorder_push(&data->engine, sample_in_block,
                                  msg[0], msg[1], msg[2]);
@@ -695,7 +692,8 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         && (process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO);
     if (host_has_tempo) {
         m4a_engine_set_tempo_bpm(&data->engine, process->transport->tempo);
-        m4a_engine_recorder_set_tempo(&data->engine, 0, process->transport->tempo);
+        if (atomic_load(&data->recorderArmed))
+            m4a_engine_recorder_set_tempo(&data->engine, 0, process->transport->tempo);
 #if defined(M4A_DRIVER_V2)
         m4a_set_tempo_bpm(data->m4a_v2, process->transport->tempo);
 #endif
@@ -711,11 +709,13 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         double startSec = (double)process->transport->loop_start_seconds / CLAP_SECTIME_FACTOR;
         double endSec   = (double)process->transport->loop_end_seconds   / CLAP_SECTIME_FACTOR;
         double posSec   = (double)process->transport->song_pos_seconds   / CLAP_SECTIME_FACTOR;
-        m4a_engine_recorder_update_loop(&data->engine, true, startSec, endSec, posSec);
+        if (atomic_load(&data->recorderArmed))
+            m4a_engine_recorder_update_loop(&data->engine, true, startSec, endSec, posSec);
     } else if (process->transport
                && (process->transport->flags & CLAP_TRANSPORT_HAS_SECONDS_TIMELINE)) {
         double posSec = (double)process->transport->song_pos_seconds / CLAP_SECTIME_FACTOR;
-        m4a_engine_recorder_update_loop(&data->engine, false, 0.0, 0.0, posSec);
+        if (atomic_load(&data->recorderArmed))
+            m4a_engine_recorder_update_loop(&data->engine, false, 0.0, 0.0, posSec);
     }
 
     const uint32_t numFrames = process->frames_count;
@@ -823,12 +823,10 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         framePos = nextEventTime;
     }
 
-    /* Advance the recorder's sample clock by the full block. Runs every
-     * block — the duration display reflects total elapsed session time, not
-     * the captured buffer length. The Record toggle only gates push_event,
-     * so disarmed periods leave wall-time gaps in the SMF rather than
-     * compressing the timeline. */
-    m4a_engine_recorder_advance(&data->engine, numFrames);
+    /* Advance recorder time only while armed. Record now gates all recorder
+     * state, not just MIDI event pushes. */
+    if (atomic_load(&data->recorderArmed))
+        m4a_engine_recorder_advance(&data->engine, numFrames);
 
     /* Tick the running sample-time counter used to measure MIDI clock intervals.
      * Sample_in_block offsets stay valid because realtime events are stamped
