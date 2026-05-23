@@ -76,6 +76,7 @@ static void plugin_format_pending_xcmd(char *buf, size_t buf_size, unsigned int 
  *   reverb         - Reverb amount (0-127)
  *   master_volume  - Master volume (0-15)
  *   analog_filter  - GBA analog output low-pass filter (0=off, 1=on)
+ *   mono_output    - Route output like Emerald mono mode (0=stereo, 1=mono)
  */
 static void load_config_file(M4APluginData *data)
 {
@@ -130,6 +131,8 @@ static void load_config_file(M4APluginData *data)
             data->songMasterVolume = (uint8_t)v;
         } else if (strcmp(key, "analog_filter") == 0) {
             data->analogFilter = (atoi(value) != 0);
+        } else if (strcmp(key, "mono_output") == 0) {
+            data->monoOutput = (atoi(value) != 0);
         } else if (strcmp(key, "max_channels") == 0) {
             int v = atoi(value);
             if (v < 1) v = 1;
@@ -181,6 +184,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->songMasterVolume = MAX_SONG_VOLUME;
     data->reverbAmount = 0;
     data->analogFilter = false;
+    data->monoOutput = false;
     data->maxPcmChannels = 5;
     data->projectRoot[0] = '\0';
     data->voicegroupName[0] = '\0';
@@ -275,6 +279,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     m4a_set_master_volume(data->m4a_v2, data->masterVolume);
     m4a_set_song_volume(data->m4a_v2, data->songMasterVolume);
     m4a_set_analog_filter(data->m4a_v2, data->analogFilter);
+    m4a_set_stereo(data->m4a_v2, !data->monoOutput);
     m4a_set_max_pcm_channels(data->m4a_v2, data->maxPcmChannels);
     m4a_set_reverb_amount(data->m4a_v2, data->reverbAmount);
 #endif
@@ -908,6 +913,8 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     uint32_t pathLen = (uint32_t)strlen(data->recorderPath);
     if (stream->write(stream, &pathLen, sizeof(pathLen)) != sizeof(pathLen)) return false;
     if (pathLen > 0 && stream->write(stream, data->recorderPath, pathLen) != (int64_t)pathLen) return false;
+    uint8_t monoOutputByte = data->monoOutput ? 1 : 0;
+    if (stream->write(stream, &monoOutputByte, 1) != 1) return false;
 
     return true;
 }
@@ -963,6 +970,11 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
             }
         }
     }
+    {
+        uint8_t monoOutputByte = data->monoOutput ? 1 : 0;
+        if (stream->read(stream, &monoOutputByte, 1) == 1)
+            data->monoOutput = (monoOutputByte != 0);
+    }
 
     if (data->activated) {
         /* Only reload voicegroup if the project root or name actually changed */
@@ -996,6 +1008,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         m4a_set_master_volume(data->m4a_v2, data->masterVolume);
         m4a_set_song_volume(data->m4a_v2, data->songMasterVolume);
         m4a_set_analog_filter(data->m4a_v2, data->analogFilter);
+        m4a_set_stereo(data->m4a_v2, !data->monoOutput);
         m4a_set_max_pcm_channels(data->m4a_v2, data->maxPcmChannels);
         m4a_set_reverb_amount(data->m4a_v2, data->reverbAmount);
 #endif
@@ -1012,6 +1025,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         gs.masterVolume     = data->masterVolume;
         gs.songMasterVolume = data->songMasterVolume;
         gs.analogFilter     = data->analogFilter;
+        gs.monoOutput       = data->monoOutput;
         gs.maxPcmChannels   = data->maxPcmChannels;
         gs.voicegroupLoaded = (data->loadedVg != NULL);
         m4a_gui_update_settings(data->gui, &gs);
@@ -1145,6 +1159,7 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
     data->masterVolume     = gs.masterVolume;
     data->songMasterVolume = gs.songMasterVolume;
     data->analogFilter     = gs.analogFilter;
+    data->monoOutput       = gs.monoOutput;
     data->maxPcmChannels   = gs.maxPcmChannels;
 
     if (data->activated) {
@@ -1158,6 +1173,7 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
         m4a_set_song_volume(data->m4a_v2, gs.songMasterVolume);
         m4a_set_reverb_amount(data->m4a_v2, gs.reverbAmount);
         m4a_set_analog_filter(data->m4a_v2, gs.analogFilter);
+        m4a_set_stereo(data->m4a_v2, !gs.monoOutput);
         m4a_set_max_pcm_channels(data->m4a_v2, gs.maxPcmChannels);
 #endif
     }
@@ -1263,6 +1279,7 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
     gs.masterVolume     = data->masterVolume;
     gs.songMasterVolume = data->songMasterVolume;
     gs.analogFilter     = data->analogFilter;
+    gs.monoOutput       = data->monoOutput;
     gs.maxPcmChannels   = data->maxPcmChannels;
     gs.voicegroupLoaded = (data->loadedVg != NULL);
 

@@ -207,6 +207,7 @@ struct M4ADriver {
     uint8_t  reverb_amount;
     bool     analog_filter;
     uint8_t  max_pcm_channels;
+    bool     mono_output;
     double   tempo_bpm;
 
     /* m4a tempo accumulator (vblank-clocked).  Fires LFO ticks when tempoC

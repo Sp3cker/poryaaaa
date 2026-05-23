@@ -1,6 +1,7 @@
 #ifndef M4A_DRIVER_H
 #define M4A_DRIVER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "m4a_register_file.h"
@@ -108,6 +109,7 @@ void m4a_set_master_volume(M4ADriver *drv, uint8_t volume);   /* 0..15 m4a maste
 void m4a_set_reverb_amount(M4ADriver *drv, uint8_t amount);   /* 0..127 */
 void m4a_set_analog_filter(M4ADriver *drv, bool enabled);     /* chip-side LPF */
 void m4a_set_max_pcm_channels(M4ADriver *drv, uint8_t maxChannels);
+void m4a_set_stereo(M4ADriver *drv, bool stereo);
 void m4a_set_tempo_bpm(M4ADriver *drv, double bpm);
 
 /* Advance the driver's internal vblank clock by `host_frames` at the

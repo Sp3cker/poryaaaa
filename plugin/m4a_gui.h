@@ -24,6 +24,7 @@ typedef struct {
     uint8_t masterVolume;
     uint8_t songMasterVolume;
     bool analogFilter;
+    bool monoOutput;
     uint8_t maxPcmChannels;
     bool voicegroupLoaded;
 } M4AGuiSettings;

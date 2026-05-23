@@ -31,9 +31,8 @@ static int cgb_pan(M4ADriverCgbChan *ch) {
 /* ChnVolSetCgb — pokeemerald m4a.c equivalent.  Converts the software L/R
  * volumes (post-velocity, post-track-vol, post-pan) into the hardware
  * 4-bit envelope goal and the NR51 pan routing byte. */
-void m4a_chn_vol_set_cgb(M4ADriverCgbChan *ch, M4ADriverTrack *track) {
-    (void)track;
-    if (!cgb_pan(ch)) {
+void m4a_chn_vol_set_cgb(M4ADriverCgbChan *ch, bool mono) {
+    if (mono || !cgb_pan(ch)) {
         ch->pan = 0xFF;
         ch->envelopeGoal = (uint32_t)(ch->leftVolume + ch->rightVolume) / 16;
     } else {

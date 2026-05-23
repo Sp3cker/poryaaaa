@@ -7,7 +7,7 @@
 
 /* Forward decls — provided by m4a_cgb.c / m4a_pcm.c.  Kept private to
  * plugin/m4a/. */
-extern void m4a_chn_vol_set_cgb(M4ADriverCgbChan *ch, M4ADriverTrack *track);
+extern void m4a_chn_vol_set_cgb(M4ADriverCgbChan *ch, bool mono);
 extern void m4a_drv_cgb_start(M4ADriverCgbChan *ch);
 extern void m4a_drv_cgb_disable(M4ADriver *drv, M4ADriverCgbChan *ch, int idx);
 extern void m4a_drv_pcm_start(M4ADriverPcmChan *ch, WaveData *wav, uint8_t type);
@@ -175,7 +175,7 @@ static void refresh_cgb_volumes(M4ADriver *drv, int trackIndex) {
         ch->leftVolume = (uint8_t)result;
 
         if (ch->rightVolume != prevR || ch->leftVolume != prevL) {
-            m4a_chn_vol_set_cgb(ch, track);
+            m4a_chn_vol_set_cgb(ch, drv->mono_output);
             ch->modify |= M4A_MO_VOL;
         }
     }
@@ -265,7 +265,7 @@ void m4a_note_on(M4ADriver *drv, int track, uint8_t key, uint8_t velocity) {
         ch->leftVolume = (uint8_t)res;
 
         /* Compute envelope goal + NR51 pan mask. */
-        m4a_chn_vol_set_cgb(ch, t);
+        m4a_chn_vol_set_cgb(ch, drv->mono_output);
 
         /* Voice-specific bits: duty (sq1/sq2), sweep (sq1), wave RAM (wave). */
         if (voiceType == 1 || voiceType == 2) {

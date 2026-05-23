@@ -1876,6 +1876,18 @@ static void test_v2_lfo_disabled_no_freq_drift(void)
     ASSERT(all_equal,                "mod=0 produces constant sq2_freq (no LFO drift)");
 }
 
+static void test_v2_lfo_speed_default_matches_m4a(void)
+{
+    printf("Testing v2 LFO speed default matches m4a...\n");
+
+    M4ADriver *drv = m4a_driver_create(44100.0f);
+
+    for (int i = 0; i < M4A_MAX_TRACKS; i++)
+        ASSERT_EQ(drv->tracks[i].lfoSpeed, 22, "track lfoSpeed defaults to 22");
+
+    m4a_driver_destroy(drv);
+}
+
 static void test_v2_lfo_vibrato_modulates_freq(void)
 {
     printf("Testing v2 LFO vibrato (modT=0) modulates SQ2 freq across vblanks...\n");
@@ -2776,6 +2788,67 @@ static void test_v2_all_sound_off_immediate(void)
     ASSERT(!r->trigger_sq2,          "all_sound_off does NOT set trigger_sq2");
 
     m4a_driver_destroy(drv);
+}
+
+static void test_v2_stereo_toggle_matches_emerald(void)
+{
+    printf("Testing v2 stereo/mono toggle matches Emerald SOUNDCNT_H routing...\n");
+
+    M4ADriver *drv = m4a_driver_create(44100.0f);
+    const M4ARegisterFile *r = m4a_get_register_file(drv);
+
+    ASSERT_EQ(r->psg_volume_code, 2, "stereo CGB full mix");
+    ASSERT_EQ(r->dma_a_volume_code, 1, "stereo DMA A full mix");
+    ASSERT_EQ(r->dma_b_volume_code, 1, "stereo DMA B full mix");
+    ASSERT(!r->dma_a_enable_left,   "stereo DMA A not left");
+    ASSERT(r->dma_a_enable_right,   "stereo DMA A right");
+    ASSERT(r->dma_b_enable_left,    "stereo DMA B left");
+    ASSERT(!r->dma_b_enable_right,  "stereo DMA B not right");
+
+    m4a_set_stereo(drv, false);
+    ASSERT_EQ(r->psg_volume_code, 2, "mono CGB full mix");
+    ASSERT_EQ(r->dma_a_volume_code, 0, "mono DMA A half mix");
+    ASSERT_EQ(r->dma_b_volume_code, 0, "mono DMA B half mix");
+    ASSERT(r->dma_a_enable_left,    "mono DMA A left");
+    ASSERT(r->dma_a_enable_right,   "mono DMA A right");
+    ASSERT(r->dma_b_enable_left,    "mono DMA B left");
+    ASSERT(r->dma_b_enable_right,   "mono DMA B right");
+    ASSERT_EQ(m4a_get_pending_writes(drv)->events[0].value, 0x3302,
+              "mono emits Emerald SOUNDCNT_H value");
+
+    m4a_set_stereo(drv, true);
+    ASSERT_EQ(r->dma_a_volume_code, 1, "restored DMA A full mix");
+    ASSERT_EQ(r->dma_b_volume_code, 1, "restored DMA B full mix");
+    ASSERT(!r->dma_a_enable_left,   "restored DMA A not left");
+    ASSERT(r->dma_a_enable_right,   "restored DMA A right");
+    ASSERT(r->dma_b_enable_left,    "restored DMA B left");
+    ASSERT(!r->dma_b_enable_right,  "restored DMA B not right");
+
+    m4a_driver_destroy(drv);
+}
+
+extern void m4a_chn_vol_set_cgb(M4ADriverCgbChan *ch, bool mono);
+
+static void test_v2_cgb_mono_forces_both_sides(void)
+{
+    printf("Testing v2 CGB mono forces both-side pan...\n");
+
+    M4ADriverCgbChan ch;
+    memset(&ch, 0, sizeof(ch));
+    ch.rightVolume = 255;
+    ch.leftVolume  = 1;
+    ch.sustain     = 15;
+    ch.panMask     = 0xFF;
+
+    m4a_chn_vol_set_cgb(&ch, false);
+    ASSERT_EQ(ch.pan, 0x0F, "stereo CGB hard-right pan remains hard-right");
+
+    m4a_chn_vol_set_cgb(&ch, true);
+    ASSERT_EQ(ch.pan, 0xFF, "mono CGB pan routes both sides");
+
+    ch.panMask = 0xF0;
+    m4a_chn_vol_set_cgb(&ch, true);
+    ASSERT_EQ(ch.pan, 0xF0, "mono CGB still honors pan mask");
 }
 #endif
 
@@ -4348,6 +4421,7 @@ int main(void)
     test_v2_xcmd_propagates_to_new_notes();
     test_v2_xcmd_protocol_safety();
     test_v2_xcmd_render_changes_audio();
+    test_v2_lfo_speed_default_matches_m4a();
     test_v2_lfo_disabled_no_freq_drift();
     test_v2_lfo_vibrato_modulates_freq();
     test_v2_lfo_delay_holds_off();
@@ -4364,6 +4438,8 @@ int main(void)
 #endif
     test_v2_no_event_drops_over_long_run();
     test_v2_all_sound_off_immediate();
+    test_v2_stereo_toggle_matches_emerald();
+    test_v2_cgb_mono_forces_both_sides();
 #endif
 
 #if defined(HW_AUDIO_V2)

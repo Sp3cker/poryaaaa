@@ -11,6 +11,22 @@ void m4a_internal_recompute_vblank_step(M4ADriver *drv) {
         drv->vblank_step = 0.0;
 }
 
+static uint32_t soundcnt_h_from_stereo(bool stereo) {
+    if (stereo)
+        return 0x210Eu; /* DMA A->R, DMA B->L, A/B/CGB full */
+    return 0x3302u;     /* DMA A/B->both, A/B half, CGB full */
+}
+
+static void apply_soundcnt_h(M4ADriver *drv, uint32_t value) {
+    drv->regs.psg_volume_code     = (uint8_t)(value & 0x03);
+    drv->regs.dma_a_volume_code   = (uint8_t)((value >> 2) & 0x01);
+    drv->regs.dma_b_volume_code   = (uint8_t)((value >> 3) & 0x01);
+    drv->regs.dma_a_enable_right  = (value & (1u << 8))  != 0;
+    drv->regs.dma_a_enable_left   = (value & (1u << 9))  != 0;
+    drv->regs.dma_b_enable_right  = (value & (1u << 12)) != 0;
+    drv->regs.dma_b_enable_left   = (value & (1u << 13)) != 0;
+}
+
 M4ADriver *m4a_driver_create(float host_sample_rate) {
     M4ADriver *drv = (M4ADriver *)calloc(1, sizeof(*drv));
     if (!drv) return NULL;
@@ -26,15 +42,9 @@ M4ADriver *m4a_driver_create(float host_sample_rate) {
     drv->regs.psg_master_enabled  = true;
     drv->regs.master_vol_left     = 7;        /* NR50 high nibble: max */
     drv->regs.master_vol_right    = 7;        /* NR50 low nibble:  max */
-    drv->regs.psg_volume_code     = 2;        /* SOUNDCNT_H bits 1-0: 100% */
-    drv->regs.dma_a_volume_code   = 1;        /* SOUNDCNT_H bit 2: 100% */
-    drv->regs.dma_b_volume_code   = 1;        /* SOUNDCNT_H bit 3: 100% */
-    /* Pokemon Emerald's m4a_init writes SOUND_A_RIGHT_OUTPUT |
-     * SOUND_B_LEFT_OUTPUT (m4a.c:352–354): DMA A → right, DMA B → left.
-     * Other games may configure differently; the chip honours whatever
-     * the register file says at render time. */
-    drv->regs.dma_a_enable_right  = true;
-    drv->regs.dma_b_enable_left   = true;
+    /* Pokemon Emerald m4a_init writes DMA A -> right, DMA B -> left,
+     * with full A/B/CGB mix. */
+    apply_soundcnt_h(drv, soundcnt_h_from_stereo(true));
     drv->regs.bias_level          = 0x200;    /* SOUNDBIAS hardware default */
     drv->regs.bias_sampling_cycle = 0;        /* 32768 Hz quirk rate */
 
@@ -63,6 +73,7 @@ M4ADriver *m4a_driver_create(float host_sample_rate) {
         drv->tracks[i].volX = 64;
         drv->tracks[i].pan = 0;
         drv->tracks[i].bendRange = 2;
+        drv->tracks[i].lfoSpeed = 22;
     }
 
     m4a_internal_recompute_vblank_step(drv);
@@ -108,6 +119,24 @@ void m4a_driver_refresh_voices(M4ADriver *drv) {
 void m4a_set_master_volume(M4ADriver *drv, uint8_t volume) {
     if (!drv) return;
     drv->master_volume = volume;
+}
+
+extern void m4a_chn_vol_set_cgb(M4ADriverCgbChan *ch, bool mono);
+
+void m4a_set_stereo(M4ADriver *drv, bool stereo) {
+    if (!drv) return;
+
+    drv->mono_output = !stereo;
+    uint32_t soundcnt_h = soundcnt_h_from_stereo(stereo);
+    apply_soundcnt_h(drv, soundcnt_h);
+    m4a_internal_emit_event(drv, M4A_REG_SOUNDCNT_H, soundcnt_h);
+
+    for (int i = 0; i < M4A_MAX_CGB_CHANNELS; i++) {
+        M4ADriverCgbChan *ch = &drv->cgb[i];
+        if (!(ch->status & M4A_CHN_ON)) continue;
+        m4a_chn_vol_set_cgb(ch, drv->mono_output);
+        ch->modify |= M4A_MO_VOL;
+    }
 }
 
 void m4a_set_reverb_amount(M4ADriver *drv, uint8_t amount) {

@@ -321,6 +321,8 @@ static void render_general_tab(M4AGuiState *gui)
     }
     if (ImGui::Checkbox("GBA Analog Filter", &gui->settings.analogFilter))
         gui->settingsChanged = true;
+    if (ImGui::Checkbox("Mono Output", &gui->settings.monoOutput))
+        gui->settingsChanged = true;
 
     /* ---- Output Device (standalone only) ----
      * audioApi.list_outputs is wired by the standalone entry to RtAudio.
@@ -837,6 +839,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
         memset(&gui->settings, 0, sizeof(gui->settings));
         gui->settings.masterVolume     = 15;
         gui->settings.songMasterVolume = 127;
+        gui->settings.monoOutput       = false;
     }
     sync_buffers(gui);
 
